@@ -110,9 +110,9 @@ func TestRootCmd(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:         "root flags parse",
-			args:         []string{"--dry-run", "-m", "publish", "--only", "cli"},
-			wantContains: []string{"not implemented yet"},
+			name:    "root rejects positional arguments",
+			args:    []string{"extra"},
+			wantErr: true,
 		},
 	}
 
@@ -252,5 +252,139 @@ func TestCheckMissingConfig(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "outlet.yml") {
 		t.Errorf("error %q does not name the config file (output %q)", err, out)
+	}
+}
+
+func TestPublishDryRunOutput(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", `publish:
+  helpers.js: src/helpers.js
+  my-cool-app: projects/my-cool-app
+`)
+	chdir(t, root)
+
+	out, err := runRoot(t, "--dry-run")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (output %q)", err, out)
+	}
+
+	want := `✔ helpers.js    gist  would create
+- my-cool-app   repo  skipped (repo publishing not implemented yet)
+
+1 would publish, 0 unchanged, 1 skipped, 0 failed
+`
+	if out != want {
+		t.Errorf("output =\n%s\nwant\n%s", out, want)
+	}
+}
+
+func TestPublishDryRunFlagsAndOnly(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", `publish:
+  helpers.js: src/helpers.js
+  my-cool-app: projects/my-cool-app
+`)
+	chdir(t, root)
+
+	out, err := runRoot(t, "--dry-run", "-m", "publish", "--only", "helpers.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (output %q)", err, out)
+	}
+	if !strings.Contains(out, "✔ helpers.js   gist  would create") {
+		t.Errorf("output %q does not contain the selected entry", out)
+	}
+	if strings.Contains(out, "my-cool-app") {
+		t.Errorf("output %q includes an unselected entry", out)
+	}
+}
+
+func TestPublishOnlyUnknown(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", `publish:
+  helpers.js: src/helpers.js
+  my-cool-app: projects/my-cool-app
+`)
+	chdir(t, root)
+
+	out, err := runRoot(t, "--dry-run", "--only", "nope")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	for _, want := range []string{`unknown entry "nope"`, "helpers.js, my-cool-app"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+	if out != "" {
+		t.Errorf("output = %q, want none", out)
+	}
+}
+
+func TestPublishExplicitConfigRelativeToCwd(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", "publish:\n  default: src\n")
+	writeRepoFile(t, root, "configs/other.yml", "publish:\n  chosen: src/helpers.js\n")
+	chdir(t, root)
+
+	out, err := runRoot(t, "--dry-run", "--config", "configs/other.yml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (output %q)", err, out)
+	}
+	if !strings.Contains(out, "✔ chosen") {
+		t.Errorf("output %q does not list the explicit config entry", out)
+	}
+	if strings.Contains(out, "✔ default") {
+		t.Errorf("output %q used the default config", out)
+	}
+}
+
+func TestPublishConfigErrorsReported(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", `publish:
+  app: projects/my-cool-app
+extra: true
+`)
+	chdir(t, root)
+
+	out, err := runRoot(t, "--dry-run")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	for _, want := range []string{"✖", `unknown key "extra" at top level`, "config invalid"} {
+		got := out
+		if want == "config invalid" {
+			got = err.Error()
+		}
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q / error %q does not contain %q", out, err, want)
+		}
+	}
+}
+
+func TestPublishMissingConfig(t *testing.T) {
+	root := newCheckRepo(t)
+	chdir(t, root)
+
+	out, err := runRoot(t, "--dry-run")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "outlet.yml") {
+		t.Errorf("error %q does not name the config file (output %q)", err, out)
+	}
+}
+
+func TestPublishMissingGh(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", "publish:\n  helpers.js: src/helpers.js\n")
+	chdir(t, root)
+	t.Setenv("PATH", "")
+
+	out, err := runRoot(t)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "gh auth login") {
+		t.Errorf("error %q does not mention gh auth login (output %q)", err, out)
 	}
 }

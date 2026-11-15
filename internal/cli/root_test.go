@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,10 +18,73 @@ func runRoot(t *testing.T, args ...string) (string, error) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SetArgs(args)
+	cmd.SetContext(context.Background())
 
 	err := cmd.Execute()
 
 	return out.String(), err
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+func newCheckRepo(t *testing.T) string {
+	t.Helper()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+
+	root := t.TempDir()
+	runGit(t, root, "init", "-q")
+	runGit(t, root, "config", "user.email", "test@example.com")
+	runGit(t, root, "config", "user.name", "Test")
+	runGit(t, root, "config", "commit.gpgsign", "false")
+
+	writeRepoFile(t, root, "src/helpers.js", "")
+	writeRepoFile(t, root, "projects/my-cool-app/a.js", "")
+	writeRepoFile(t, root, "projects/my-cool-app/README.md", "")
+
+	runGit(t, root, "add", "-A")
+	runGit(t, root, "commit", "-q", "-m", "init")
+
+	return root
+}
+
+func writeRepoFile(t *testing.T, root, name, contents string) {
+	t.Helper()
+
+	path := filepath.Join(root, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", name, err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+func chdir(t *testing.T, dir string) {
+	t.Helper()
+
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(old); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
 }
 
 func TestRootCmd(t *testing.T) {
@@ -70,69 +135,122 @@ func TestRootCmd(t *testing.T) {
 	}
 }
 
-func writeOutletConfig(t *testing.T, contents string) string {
-	t.Helper()
+func TestCheckOutput(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", `publish:
+  helpers.js: src/helpers.js
+  my-cool-app:
+    path: projects/my-cool-app
+    exclude: ["fixtures/**"]
+  docs-site:
+    path: docs/site
+`)
+	chdir(t, root)
 
-	path := filepath.Join(t.TempDir(), "outlet.yml")
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
+	out, err := runRoot(t, "check")
+	if err == nil {
+		t.Fatal("expected error, got nil")
 	}
 
-	return path
+	want := `✔ helpers.js   gist  1 file
+✔ my-cool-app  repo  2 files
+⚠ my-cool-app: exclude "fixtures/**" matches nothing
+✖ docs-site: path "docs/site" does not exist
+
+1 error, 1 warning
+`
+	if out != want {
+		t.Errorf("output =\n%s\nwant\n%s", out, want)
+	}
 }
 
-func TestCheckCmd(t *testing.T) {
-	t.Run("valid file", func(t *testing.T) {
-		path := writeOutletConfig(t, `publish:
-  one: src/one
-  two:
-    path: src/two
-`)
-
-		out, err := runRoot(t, "check", "--config", path)
-		if err != nil {
-			t.Fatalf("unexpected error: %v (output %q)", err, out)
-		}
-		if !strings.Contains(out, "ok: 2 entries") {
-			t.Errorf("output %q does not contain %q", out, "ok: 2 entries")
-		}
-	})
-
-	t.Run("invalid file lists every problem", func(t *testing.T) {
-		path := writeOutletConfig(t, `settings:
-  mode: zip
-publish:
+func TestCheckWarningsOnly(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", `publish:
   app:
-    path: src/app
-    exlude: ["*.js"]
-  app: src/other
+    path: projects/my-cool-app
+    exclude: ["nope/**"]
 `)
+	chdir(t, root)
 
-		out, err := runRoot(t, "check", "--config", path)
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		for _, want := range []string{
-			`invalid mode "zip"`,
-			`unknown key "exlude"`,
-			`duplicate publish name "app"`,
-			path,
-		} {
-			if !strings.Contains(out, want) {
-				t.Errorf("output %q does not contain %q", out, want)
-			}
-		}
-	})
+	out, err := runRoot(t, "check")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (output %q)", err, out)
+	}
 
-	t.Run("missing file", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "absent.yml")
+	for _, want := range []string{
+		`✔ app`,
+		`⚠ app: exclude "nope/**" matches nothing`,
+		"0 errors, 1 warning",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q does not contain %q", out, want)
+		}
+	}
+}
 
-		_, err := runRoot(t, "check", "--config", path)
-		if err == nil {
-			t.Fatal("expected error, got nil")
+func TestCheckDefaultConfigAtRoot(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", "publish:\n  src: src\n")
+	sub := filepath.Join(root, "projects", "my-cool-app")
+	chdir(t, sub)
+
+	out, err := runRoot(t, "check")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (output %q)", err, out)
+	}
+	if !strings.Contains(out, "✔ src") {
+		t.Errorf("output %q does not list the root config entry", out)
+	}
+}
+
+func TestCheckExplicitConfigRelativeToCwd(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", "publish:\n  default: src\n")
+	writeRepoFile(t, root, "configs/other.yml", "publish:\n  chosen: src/helpers.js\n")
+	chdir(t, root)
+
+	out, err := runRoot(t, "check", "--config", "configs/other.yml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (output %q)", err, out)
+	}
+	if !strings.Contains(out, "✔ chosen") {
+		t.Errorf("output %q does not list the explicit config entry", out)
+	}
+	if strings.Contains(out, "✔ default") {
+		t.Errorf("output %q used the default config", out)
+	}
+}
+
+func TestCheckConfigErrorsReported(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", `publish:
+  app: projects/my-cool-app
+extra: true
+`)
+	chdir(t, root)
+
+	out, err := runRoot(t, "check")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	for _, want := range []string{`unknown key "extra" at top level`, "1 error, 0 warnings"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q does not contain %q", out, want)
 		}
-		if !strings.Contains(err.Error(), "absent.yml") {
-			t.Errorf("error %q does not name the file", err)
-		}
-	})
+	}
+}
+
+func TestCheckMissingConfig(t *testing.T) {
+	root := newCheckRepo(t)
+	chdir(t, root)
+
+	out, err := runRoot(t, "check")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "outlet.yml") {
+		t.Errorf("error %q does not name the config file (output %q)", err, out)
+	}
 }

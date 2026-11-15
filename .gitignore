@@ -1,0 +1,19 @@
+# Build output
+/git-outlet
+/dist/
+*.exe
+*.test
+*.out
+
+# Runtime state
+.git-outlet-state.json
+
+# Editors and OS files
+.idea/
+.vscode/
+.history/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

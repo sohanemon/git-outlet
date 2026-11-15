@@ -9,16 +9,24 @@ import (
 	"path/filepath"
 )
 
-// Entry records the published Gist and content hash of one outlet entry.
-type Entry struct {
-	GistID string `json:"gist_id"`
-	Hash   string `json:"hash"`
+// NOTE: Repo records tool ownership so safety checks can distinguish adopted repos.
+type Repo struct {
+	Owner  string `json:"owner"`
+	Name   string `json:"name"`
+	Commit string `json:"commit"`
 }
 
-// State maps outlet entry names to their recorded publication.
+// NOTE: Entry records one publication; Gist and Repo are mutually exclusive.
+type Entry struct {
+	GistID string `json:"gist_id,omitempty"`
+	Hash   string `json:"hash,omitempty"`
+	Repo   *Repo  `json:"repo,omitempty"`
+}
+
+// NOTE: State maps outlet entry names to their recorded publication.
 type State map[string]Entry
 
-// Load reads the state file, returning an empty state when it does not exist.
+// NOTE: Load reads the state file, returning an empty state when it does not exist.
 func Load(path string) (State, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -36,7 +44,7 @@ func Load(path string) (State, error) {
 	return st, nil
 }
 
-// Save writes the state file atomically with stable indentation.
+// NOTE: Save writes the state file atomically with stable indentation.
 func Save(path string, st State) error {
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -66,14 +74,14 @@ func Save(path string, st State) error {
 	return nil
 }
 
-// Get returns the recorded entry for name.
+// NOTE: Get returns the recorded entry for name.
 func (s State) Get(name string) (Entry, bool) {
 	entry, ok := s[name]
 
 	return entry, ok
 }
 
-// Set records entry for name.
+// NOTE: Set records entry for name.
 func (s State) Set(name string, entry Entry) {
 	s[name] = entry
 }

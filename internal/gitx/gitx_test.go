@@ -144,3 +144,17 @@ func TestTrackedFilesSkipsSymlinksAndMissing(t *testing.T) {
 		t.Errorf("TrackedFiles() skipped = %d, want 2", skipped)
 	}
 }
+
+func TestShortHead(t *testing.T) {
+	repo := newRepo(t)
+	writeFile(t, repo, "a.txt", "a")
+	commitAll(t, repo)
+
+	got, err := ShortHead(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("ShortHead() error: %v", err)
+	}
+	if len(got) < 7 || strings.ContainsAny(got, " \n") {
+		t.Errorf("ShortHead() = %q, want an abbreviated commit hash", got)
+	}
+}

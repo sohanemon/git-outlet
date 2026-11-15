@@ -26,6 +26,7 @@ func TestRoundTrip(t *testing.T) {
 	want := State{
 		"helpers.js": {GistID: "abc123", Hash: "deadbeef"},
 		"notes.md":   {GistID: "def456", Hash: "cafebabe"},
+		"my-app":     {Repo: &Repo{Owner: "sohanemon", Name: "my-app", Commit: "0123456"}},
 	}
 
 	if err := Save(path, want); err != nil {
@@ -38,6 +39,32 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Load() = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadLegacyState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy := `{
+  "helpers.js": {
+    "gist_id": "abc123",
+    "hash": "deadbeef"
+  }
+}
+`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	entry, ok := st.Get("helpers.js")
+	if !ok {
+		t.Fatal("Load() dropped the legacy entry")
+	}
+	if entry.GistID != "abc123" || entry.Hash != "deadbeef" || entry.Repo != nil {
+		t.Errorf("Load() entry = %+v, want the Gist fields and no repo", entry)
 	}
 }
 

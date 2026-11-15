@@ -97,7 +97,7 @@ func TestRootCmd(t *testing.T) {
 		{
 			name:         "help lists check subcommand",
 			args:         []string{"--help"},
-			wantContains: []string{"check", "git-outlet"},
+			wantContains: []string{"check", "git-outlet", "adopt"},
 		},
 		{
 			name:    "check rejects positional arguments",
@@ -259,7 +259,9 @@ func TestPublishDryRunOutput(t *testing.T) {
 	root := newCheckRepo(t)
 	writeRepoFile(t, root, "outlet.yml", `publish:
   helpers.js: src/helpers.js
-  my-cool-app: projects/my-cool-app
+  my-cool-app:
+    path: projects/my-cool-app
+    mode: subtree
 `)
 	chdir(t, root)
 
@@ -269,7 +271,7 @@ func TestPublishDryRunOutput(t *testing.T) {
 	}
 
 	want := `✔ helpers.js    gist  would create
-- my-cool-app   repo  skipped (repo publishing not implemented yet)
+- my-cool-app   repo  skipped (subtree not implemented yet)
 
 1 would publish, 0 unchanged, 1 skipped, 0 failed
 `
@@ -286,7 +288,7 @@ func TestPublishDryRunFlagsAndOnly(t *testing.T) {
 `)
 	chdir(t, root)
 
-	out, err := runRoot(t, "--dry-run", "-m", "publish", "--only", "helpers.js")
+	out, err := runRoot(t, "--dry-run", "--adopt", "-m", "publish", "--only", "helpers.js")
 	if err != nil {
 		t.Fatalf("unexpected error: %v (output %q)", err, out)
 	}

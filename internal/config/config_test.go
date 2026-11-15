@@ -105,7 +105,6 @@ publish:
 				Settings: Settings{
 					Mode:       "copy",
 					Branch:     "main",
-					Message:    "Update from private repo",
 					SecretScan: true,
 				},
 				Entries: []Entry{
@@ -124,7 +123,6 @@ publish:
 				Settings: Settings{
 					Mode:       "copy",
 					Branch:     "main",
-					Message:    "Update from private repo",
 					SecretScan: true,
 				},
 				Entries: []Entry{

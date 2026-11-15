@@ -14,16 +14,18 @@ import (
 	"github.com/sohanemon/git-outlet/internal/gist"
 	"github.com/sohanemon/git-outlet/internal/gitx"
 	"github.com/sohanemon/git-outlet/internal/publish"
+	"github.com/sohanemon/git-outlet/internal/repo"
 )
 
 type options struct {
 	dryRun     bool
 	message    string
 	only       string
+	adopt      bool
 	configPath string
 }
 
-// Execute runs the git-outlet root command.
+// NOTE: Execute runs the git-outlet root command.
 func Execute() error {
 	return newRootCmd().Execute()
 }
@@ -50,6 +52,7 @@ an outlet.yml configuration. Run it as "git outlet" or "git-outlet".`,
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "show what would be published without publishing")
 	cmd.Flags().StringVarP(&opts.message, "message", "m", "", "commit message for the published Gist or repository")
 	cmd.Flags().StringVar(&opts.only, "only", "", "publish only the named outlet entry")
+	cmd.Flags().BoolVar(&opts.adopt, "adopt", false, "take over an existing public repository not created by git-outlet")
 	cmd.Flags().StringVar(&opts.configPath, "config", "outlet.yml", "path to the outlet configuration file")
 
 	cmd.AddCommand(newCheckCmd())
@@ -87,12 +90,15 @@ func runPublish(cmd *cobra.Command, opts *options) error {
 	}
 
 	return publish.Run(cmd.Context(), publish.Options{
-		Config: cfg,
-		Root:   root,
-		DryRun: opts.dryRun,
-		Only:   opts.only,
-		Out:    cmd.OutOrStdout(),
-		Gist:   gist.New(gist.ExecRunner{}),
+		Config:  cfg,
+		Root:    root,
+		DryRun:  opts.dryRun,
+		Only:    opts.only,
+		Adopt:   opts.adopt,
+		Message: opts.message,
+		Out:     cmd.OutOrStdout(),
+		Gist:    gist.New(gist.ExecRunner{}),
+		Repos:   repo.New(repo.ExecRunner{}),
 	})
 }
 

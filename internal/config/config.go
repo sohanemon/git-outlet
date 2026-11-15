@@ -11,12 +11,11 @@ import (
 )
 
 const (
-	defaultMode    = "copy"
-	defaultBranch  = "main"
-	defaultMessage = "Update from private repo"
+	defaultMode   = "copy"
+	defaultBranch = "main"
 )
 
-// Settings holds the defaults applied to every publish entry.
+// NOTE: Settings holds the defaults applied to every publish entry.
 type Settings struct {
 	Owner      string
 	Mode       string
@@ -25,7 +24,7 @@ type Settings struct {
 	SecretScan bool
 }
 
-// Entry describes a published file or folder; empty Mode and Message mean "inherit from Settings".
+// NOTE: Entry describes a published file or folder; empty Mode and Message mean "inherit from Settings".
 type Entry struct {
 	Name        string
 	Path        string
@@ -36,30 +35,30 @@ type Entry struct {
 	Mode        string
 }
 
-// Config is a parsed outlet.yml file with Entries in file order.
+// NOTE: Config is a parsed outlet.yml file with Entries in file order.
 type Config struct {
 	Settings Settings
 	Entries  []Entry
 }
 
-// Problem is one structural error found in a config file.
+// NOTE: Problem is one structural error found in a config file.
 type Problem struct {
 	Line    int
 	Message string
 }
 
-// String renders the problem as "line N: message".
+// NOTE: String renders the problem as "line N: message".
 func (p Problem) String() string {
 	return fmt.Sprintf("line %d: %s", p.Line, p.Message)
 }
 
-// Error reports every structural problem found in one config file.
+// NOTE: Error reports every structural problem found in one config file.
 type Error struct {
 	Path     string
 	Problems []Problem
 }
 
-// Error lists each problem prefixed with the config path and line.
+// NOTE: Error lists each problem prefixed with the config path and line.
 func (e *Error) Error() string {
 	if len(e.Problems) == 0 {
 		return e.Path
@@ -73,7 +72,7 @@ func (e *Error) Error() string {
 	return strings.Join(lines, "\n")
 }
 
-// Load reads path, parses outlet.yml and applies the config defaults.
+// NOTE: Load reads path, parses outlet.yml and applies the config defaults.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -88,7 +87,7 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// UnmarshalYAML accepts a path string or a full entry mapping.
+// NOTE: UnmarshalYAML accepts a path string or a full entry mapping.
 func (e *Entry) UnmarshalYAML(n *yaml.Node) error {
 	p := &parser{}
 
@@ -136,9 +135,6 @@ func applyDefaults(s *Settings) {
 	}
 	if s.Branch == "" {
 		s.Branch = defaultBranch
-	}
-	if s.Message == "" {
-		s.Message = defaultMessage
 	}
 }
 

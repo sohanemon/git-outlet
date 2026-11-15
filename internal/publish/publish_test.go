@@ -13,6 +13,8 @@ import (
 
 	"github.com/sohanemon/git-outlet/internal/config"
 	"github.com/sohanemon/git-outlet/internal/gist"
+	"github.com/sohanemon/git-outlet/internal/gitx"
+	"github.com/sohanemon/git-outlet/internal/repo"
 	"github.com/sohanemon/git-outlet/internal/state"
 )
 
@@ -56,6 +58,83 @@ func (f *fakeGister) Update(_ context.Context, id, name, description, content st
 	}
 
 	return "https://gist.github.com/" + id, nil
+}
+
+type fakeRepositor struct {
+	owner      string
+	ownerErr   error
+	ownerCalls int
+
+	info       repo.Info
+	inspectErr error
+
+	createErr error
+	creates   int
+	created   []string
+
+	syncResult repo.Result
+	syncErr    error
+	syncErrFor map[string]error
+	syncs      int
+	lastSync   repo.SyncOptions
+
+	previewResult repo.Result
+	previewErr    error
+	previews      int
+}
+
+func newFakeRepositor() *fakeRepositor {
+	return &fakeRepositor{
+		owner: "octocat",
+		syncResult: repo.Result{
+			Commit: "sha1",
+			URL:    "https://github.com/octocat/my-cool-app",
+			Added:  2,
+		},
+	}
+}
+
+func (f *fakeRepositor) Owner(_ context.Context, settingsOwner string) (string, error) {
+	f.ownerCalls++
+	if f.ownerErr != nil {
+		return "", f.ownerErr
+	}
+	if f.owner != "" {
+		return f.owner, nil
+	}
+	if settingsOwner != "" {
+		return settingsOwner, nil
+	}
+
+	return "octocat", nil
+}
+
+func (f *fakeRepositor) Inspect(_ context.Context, owner, name string) (repo.Info, error) {
+	return f.info, f.inspectErr
+}
+
+func (f *fakeRepositor) Create(_ context.Context, owner, name, description string) error {
+	f.creates++
+	f.created = append(f.created, owner+"/"+name)
+
+	return f.createErr
+}
+
+func (f *fakeRepositor) Sync(_ context.Context, opts repo.SyncOptions) (repo.Result, error) {
+	f.syncs++
+	f.lastSync = opts
+	if err := f.syncErrFor[opts.Name]; err != nil {
+		return repo.Result{}, err
+	}
+
+	return f.syncResult, f.syncErr
+}
+
+func (f *fakeRepositor) Preview(_ context.Context, opts repo.SyncOptions) (repo.Result, error) {
+	f.previews++
+	f.lastSync = opts
+
+	return f.previewResult, f.previewErr
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
@@ -108,7 +187,7 @@ func sampleConfig() *config.Config {
 		Settings: config.Settings{Mode: "copy"},
 		Entries: []config.Entry{
 			{Name: "helpers.js", Path: "src/helpers.js"},
-			{Name: "my-cool-app", Path: "projects/my-cool-app"},
+			{Name: "my-cool-app", Path: "projects/my-cool-app", Mode: "subtree"},
 		},
 	}
 }
@@ -149,7 +228,7 @@ func TestPublishCreateUpdateUnchanged(t *testing.T) {
 	}
 
 	want := "✔ helpers.js    gist  created    https://gist.github.com/gist1\n" +
-		"- my-cool-app   repo  skipped (repo publishing not implemented yet)\n" +
+		"- my-cool-app   repo  skipped (subtree not implemented yet)\n" +
 		"\n1 published, 0 unchanged, 1 skipped, 0 failed\n"
 	if out != want {
 		t.Errorf("output =\n%s\nwant\n%s", out, want)
@@ -368,7 +447,7 @@ func TestPublishDryRun(t *testing.T) {
 		}
 
 		want := "✔ helpers.js    gist  would create\n" +
-			"- my-cool-app   repo  skipped (repo publishing not implemented yet)\n" +
+			"- my-cool-app   repo  skipped (subtree not implemented yet)\n" +
 			"\n1 would publish, 0 unchanged, 1 skipped, 0 failed\n"
 		if out != want {
 			t.Errorf("output =\n%s\nwant\n%s", out, want)
@@ -466,4 +545,405 @@ func TestPublishNotFoundHint(t *testing.T) {
 			t.Errorf("output %q does not contain %q", out, want)
 		}
 	}
+}
+
+func repoConfig(entries ...config.Entry) *config.Config {
+	return &config.Config{
+		Settings: config.Settings{Mode: "copy", Branch: "main"},
+		Entries:  entries,
+	}
+}
+
+func saveRepoState(t *testing.T, root, name string) {
+	t.Helper()
+
+	if err := state.Save(statePath(root), state.State{
+		name: {Repo: &state.Repo{Owner: "octocat", Name: name, Commit: "old"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishRepoCreated(t *testing.T) {
+	root := newRepo(t)
+	cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app"})
+	repos := newFakeRepositor()
+
+	out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) { opts.Repos = repos })
+	if err != nil {
+		t.Fatalf("Run() error: %v (output %q)", err, out)
+	}
+
+	want := "✔ my-cool-app   repo  created    +2        https://github.com/octocat/my-cool-app\n" +
+		"\n1 published, 0 unchanged, 0 skipped, 0 failed\n"
+	if out != want {
+		t.Errorf("output =\n%s\nwant\n%s", out, want)
+	}
+	if repos.creates != 1 || repos.syncs != 1 {
+		t.Errorf("creates = %d, syncs = %d, want one each", repos.creates, repos.syncs)
+	}
+
+	st, err := state.Load(statePath(root))
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	entry, ok := st.Get("my-cool-app")
+	if !ok || entry.Repo == nil {
+		t.Fatalf("state entry = %+v, ok = %v", entry, ok)
+	}
+	if entry.Repo.Owner != "octocat" || entry.Repo.Name != "my-cool-app" || entry.Repo.Commit != "sha1" {
+		t.Errorf("state repo = %+v", entry.Repo)
+	}
+}
+
+func TestPublishRepoUpdated(t *testing.T) {
+	root := newRepo(t)
+	cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app"})
+	saveRepoState(t, root, "my-cool-app")
+
+	repos := newFakeRepositor()
+	repos.info = repo.Info{Exists: true, DefaultBranch: "main"}
+	repos.syncResult = repo.Result{
+		Commit:  "sha2",
+		URL:     "https://github.com/octocat/my-cool-app",
+		Added:   1,
+		Changed: 1,
+		Removed: 1,
+	}
+
+	out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) { opts.Repos = repos })
+	if err != nil {
+		t.Fatalf("Run() error: %v (output %q)", err, out)
+	}
+
+	want := "✔ my-cool-app   repo  updated    +1 ~1 -1  https://github.com/octocat/my-cool-app\n" +
+		"\n1 published, 0 unchanged, 0 skipped, 0 failed\n"
+	if out != want {
+		t.Errorf("output =\n%s\nwant\n%s", out, want)
+	}
+	if repos.creates != 0 || repos.syncs != 1 {
+		t.Errorf("creates = %d, syncs = %d, want 0 and 1", repos.creates, repos.syncs)
+	}
+}
+
+func TestPublishRepoUnchanged(t *testing.T) {
+	root := newRepo(t)
+	cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app"})
+	saveRepoState(t, root, "my-cool-app")
+
+	repos := newFakeRepositor()
+	repos.info = repo.Info{Exists: true, DefaultBranch: "main"}
+	repos.syncResult = repo.Result{Commit: "head"}
+	repos.syncErr = repo.NoChanges
+
+	out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) { opts.Repos = repos })
+	if err != nil {
+		t.Fatalf("Run() error: %v (output %q)", err, out)
+	}
+
+	want := "✔ my-cool-app   repo  unchanged\n" +
+		"\n0 published, 1 unchanged, 0 skipped, 0 failed\n"
+	if out != want {
+		t.Errorf("output =\n%s\nwant\n%s", out, want)
+	}
+}
+
+func TestPublishRepoSafety(t *testing.T) {
+	tests := []struct {
+		name      string
+		info      repo.Info
+		recorded  bool
+		adopt     bool
+		wantErr   string
+		wantSyncs int
+	}{
+		{
+			name:    "existing non-empty not recorded",
+			info:    repo.Info{Exists: true},
+			wantErr: "already exists and was not created by git-outlet; pass --adopt to take it over",
+		},
+		{
+			name:      "adopt takes over",
+			info:      repo.Info{Exists: true},
+			adopt:     true,
+			wantSyncs: 1,
+		},
+		{
+			name:      "recorded repo is reused",
+			info:      repo.Info{Exists: true},
+			recorded:  true,
+			wantSyncs: 1,
+		},
+		{
+			name:      "empty existing repo is allowed",
+			info:      repo.Info{Exists: true, Empty: true},
+			wantSyncs: 1,
+		},
+		{
+			name:    "private repo is refused",
+			info:    repo.Info{Exists: true, Private: true},
+			wantErr: "only publishes to public repositories",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newRepo(t)
+			if tt.recorded {
+				saveRepoState(t, root, "my-cool-app")
+			}
+			cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app"})
+
+			repos := newFakeRepositor()
+			repos.info = tt.info
+
+			out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+				opts.Repos = repos
+				opts.Adopt = tt.adopt
+			})
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("Run() error = nil, want %q (output %q)", tt.wantErr, out)
+				}
+				if !strings.Contains(out, tt.wantErr) {
+					t.Errorf("output %q does not contain %q", out, tt.wantErr)
+				}
+				if repos.creates != 0 || repos.syncs != 0 {
+					t.Errorf("creates = %d, syncs = %d, want none", repos.creates, repos.syncs)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Run() error: %v (output %q)", err, out)
+			}
+			if repos.syncs != tt.wantSyncs {
+				t.Errorf("syncs = %d, want %d", repos.syncs, tt.wantSyncs)
+			}
+		})
+	}
+}
+
+func TestPublishRepoOwnerResolvedOnce(t *testing.T) {
+	root := newRepo(t)
+	cfg := repoConfig(
+		config.Entry{Name: "app-one", Path: "projects/my-cool-app"},
+		config.Entry{Name: "app-two", Path: "projects/my-cool-app"},
+	)
+
+	repos := newFakeRepositor()
+	repos.syncResult = repo.Result{Commit: "sha", URL: "https://github.com/octocat/app", Added: 2}
+
+	out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) { opts.Repos = repos })
+	if err != nil {
+		t.Fatalf("Run() error: %v (output %q)", err, out)
+	}
+	if repos.ownerCalls != 1 {
+		t.Errorf("Owner() calls = %d, want 1", repos.ownerCalls)
+	}
+	if repos.syncs != 2 || repos.creates != 2 {
+		t.Errorf("syncs = %d, creates = %d, want 2 each", repos.syncs, repos.creates)
+	}
+}
+
+func TestPublishRepoFailureDoesNotStopLaterEntries(t *testing.T) {
+	root := newRepo(t)
+	cfg := repoConfig(
+		config.Entry{Name: "broken", Path: "projects/my-cool-app"},
+		config.Entry{Name: "helpers.js", Path: "src/helpers.js"},
+	)
+
+	repos := newFakeRepositor()
+	repos.syncErr = errors.New("boom")
+
+	gists := &fakeGister{}
+	out, err := runPublish(t, root, cfg, gists, func(opts *Options) { opts.Repos = repos })
+	if err == nil {
+		t.Fatal("Run() error = nil, want the failed entry to surface")
+	}
+	if !strings.Contains(err.Error(), "broken") || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("Run() error = %v, want it to name broken and boom", err)
+	}
+	if len(gists.creates) != 1 {
+		t.Errorf("creates = %v, want the later Gist published", gists.creates)
+	}
+	for _, want := range []string{
+		"✖ broken",
+		"repo  failed: boom",
+		"✔ helpers.js",
+		"gist  created",
+		"1 published, 0 unchanged, 0 skipped, 1 failed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q does not contain %q", out, want)
+		}
+	}
+}
+
+func TestPublishRepoStateSavedPerEntry(t *testing.T) {
+	root := newRepo(t)
+	cfg := repoConfig(
+		config.Entry{Name: "app-one", Path: "projects/my-cool-app"},
+		config.Entry{Name: "app-two", Path: "projects/my-cool-app"},
+	)
+
+	repos := newFakeRepositor()
+	repos.syncResult = repo.Result{Commit: "sha", URL: "https://github.com/octocat/app", Added: 2}
+	repos.syncErrFor = map[string]error{"app-two": errors.New("boom")}
+
+	_, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) { opts.Repos = repos })
+	if err == nil {
+		t.Fatal("Run() error = nil, want app-two to fail")
+	}
+
+	st, err := state.Load(statePath(root))
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if entry, ok := st.Get("app-one"); !ok || entry.Repo == nil || entry.Repo.Commit != "sha" {
+		t.Errorf("state entry for app-one = %+v, ok = %v", entry, ok)
+	}
+	if _, ok := st.Get("app-two"); ok {
+		t.Error("state records the failed app-two")
+	}
+}
+
+func TestPublishRepoMessagePrecedence(t *testing.T) {
+	tests := []struct {
+		name     string
+		flag     string
+		entry    string
+		settings string
+		want     string
+	}{
+		{name: "flag wins", flag: "from flag", entry: "from entry", settings: "from settings", want: "from flag"},
+		{name: "entry wins over settings", entry: "from entry", settings: "from settings", want: "from entry"},
+		{name: "settings wins over default", settings: "from settings", want: "from settings"},
+		{name: "default uses the private HEAD", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newRepo(t)
+			cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app", Message: tt.entry})
+			cfg.Settings.Message = tt.settings
+
+			repos := newFakeRepositor()
+			_, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+				opts.Repos = repos
+				opts.Message = tt.flag
+			})
+			if err != nil {
+				t.Fatalf("Run() error: %v", err)
+			}
+
+			want := tt.want
+			if want == "" {
+				sha, err := gitx.ShortHead(context.Background(), root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = "Update from private repo (" + sha + ")"
+			}
+			if repos.lastSync.Message != want {
+				t.Errorf("commit message = %q, want %q", repos.lastSync.Message, want)
+			}
+		})
+	}
+}
+
+func TestPublishRepoDryRun(t *testing.T) {
+	t.Run("missing repo", func(t *testing.T) {
+		root := newRepo(t)
+		cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app"})
+		repos := newFakeRepositor()
+
+		out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+			opts.Repos = repos
+			opts.DryRun = true
+		})
+		if err != nil {
+			t.Fatalf("Run() error: %v (output %q)", err, out)
+		}
+
+		want := "✔ my-cool-app   repo  would create    +2\n" +
+			"\n1 would publish, 0 unchanged, 0 skipped, 0 failed\n"
+		if out != want {
+			t.Errorf("output =\n%s\nwant\n%s", out, want)
+		}
+		if repos.creates != 0 || repos.syncs != 0 || repos.previews != 0 {
+			t.Errorf("creates = %d, syncs = %d, previews = %d, want none", repos.creates, repos.syncs, repos.previews)
+		}
+		if _, err := os.Stat(statePath(root)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("state file exists after a dry run: %v", err)
+		}
+	})
+
+	t.Run("would update", func(t *testing.T) {
+		root := newRepo(t)
+		cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app"})
+		saveRepoState(t, root, "my-cool-app")
+		before, err := os.ReadFile(statePath(root))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		repos := newFakeRepositor()
+		repos.info = repo.Info{Exists: true, DefaultBranch: "main"}
+		repos.previewResult = repo.Result{
+			URL:     "https://github.com/octocat/my-cool-app",
+			Added:   1,
+			Changed: 1,
+			Removed: 1,
+		}
+
+		out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+			opts.Repos = repos
+			opts.DryRun = true
+		})
+		if err != nil {
+			t.Fatalf("Run() error: %v (output %q)", err, out)
+		}
+
+		want := "✔ my-cool-app   repo  would update    +1 ~1 -1  https://github.com/octocat/my-cool-app\n" +
+			"\n1 would publish, 0 unchanged, 0 skipped, 0 failed\n"
+		if out != want {
+			t.Errorf("output =\n%s\nwant\n%s", out, want)
+		}
+		if repos.previews != 1 || repos.creates != 0 || repos.syncs != 0 {
+			t.Errorf("creates = %d, syncs = %d, previews = %d, want one preview", repos.creates, repos.syncs, repos.previews)
+		}
+
+		after, err := os.ReadFile(statePath(root))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Errorf("dry run changed the state file:\n%s\n%s", before, after)
+		}
+	})
+
+	t.Run("unchanged", func(t *testing.T) {
+		root := newRepo(t)
+		cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app"})
+		saveRepoState(t, root, "my-cool-app")
+
+		repos := newFakeRepositor()
+		repos.info = repo.Info{Exists: true, DefaultBranch: "main"}
+
+		out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+			opts.Repos = repos
+			opts.DryRun = true
+		})
+		if err != nil {
+			t.Fatalf("Run() error: %v (output %q)", err, out)
+		}
+
+		want := "✔ my-cool-app   repo  unchanged\n" +
+			"\n0 would publish, 1 unchanged, 0 skipped, 0 failed\n"
+		if out != want {
+			t.Errorf("output =\n%s\nwant\n%s", out, want)
+		}
+	})
 }

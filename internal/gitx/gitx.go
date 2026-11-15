@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-// Runner runs a command in dir and returns its standard output.
+// NOTE: Runner runs a command in dir and returns its standard output.
 type Runner interface {
 	Run(ctx context.Context, dir, name string, args ...string) (string, error)
 }
@@ -35,9 +35,19 @@ func (execRunner) Run(ctx context.Context, dir, name string, args ...string) (st
 	return stdout.String(), nil
 }
 
-// Root returns the top level of the git repository containing dir.
+// NOTE: Root returns the top level of the git repository containing dir.
 func Root(ctx context.Context, dir string) (string, error) {
 	return root(ctx, execRunner{}, dir)
+}
+
+// NOTE: ShortHead supplies the default commit message without a second git call site.
+func ShortHead(ctx context.Context, dir string) (string, error) {
+	out, err := execRunner{}.Run(ctx, dir, "git", "rev-parse", "--short", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("read HEAD of %s: %w", dir, err)
+	}
+
+	return strings.TrimSpace(out), nil
 }
 
 func root(ctx context.Context, runner Runner, dir string) (string, error) {
@@ -49,7 +59,7 @@ func root(ctx context.Context, runner Runner, dir string) (string, error) {
 	return filepath.Clean(strings.TrimSpace(out)), nil
 }
 
-// TrackedFiles returns path-relative tracked files plus the count of skipped symlinks and missing files.
+// NOTE: TrackedFiles returns path-relative tracked files plus the count of skipped symlinks and missing files.
 func TrackedFiles(ctx context.Context, root, path string) ([]string, int, error) {
 	return trackedFiles(ctx, execRunner{}, root, path)
 }

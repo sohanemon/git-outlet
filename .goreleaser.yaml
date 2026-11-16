@@ -36,8 +36,8 @@ checksum:
 changelog:
   filters:
     exclude:
-      - ^docs:
-      - ^test:
+      - "^docs:"
+      - "^test:"
 
 homebrew_casks:
   - name: git-outlet

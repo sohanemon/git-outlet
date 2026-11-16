@@ -36,8 +36,9 @@ func newRootCmd() *cobra.Command {
 	opts := &options{}
 
 	cmd := &cobra.Command{
-		Use:   "git-outlet",
-		Short: "Publish selected files and folders from a private repository",
+		Use:     "git-outlet",
+		Version: versionString(),
+		Short:   "Publish selected files and folders from a private repository",
 		Long: `git-outlet publishes selected files and folders from a private repository.
 
 Files are pushed to public Gists and folders to public repositories, driven by

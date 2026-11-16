@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -135,6 +136,17 @@ func TestRootCmd(t *testing.T) {
 	}
 }
 
+func TestVersionDefaults(t *testing.T) {
+	out, err := runRoot(t, "--version")
+	if err != nil {
+		t.Fatalf("--version error: %v", err)
+	}
+	want := "git-outlet version dev (commit unknown, date unknown)\n"
+	if out != want {
+		t.Errorf("--version output = %q, want %q", out, want)
+	}
+}
+
 func TestCheckOutput(t *testing.T) {
 	root := newCheckRepo(t)
 	writeRepoFile(t, root, "outlet.yml", `publish:
@@ -256,6 +268,9 @@ func TestCheckMissingConfig(t *testing.T) {
 }
 
 func TestPublishDryRunOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake gh shell command is not executable on Windows")
+	}
 	root := newCheckRepo(t)
 	skipWithoutSubtree(t)
 	setMissingGH(t)

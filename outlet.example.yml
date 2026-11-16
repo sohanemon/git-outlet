@@ -1,0 +1,22 @@
+settings:
+  owner: your-github-username
+  mode: copy
+  branch: main
+  message: "Update from private repo"
+  secret_scan: true
+
+publish:
+  selection.go: internal/selection/selection.go
+
+  cli-package:
+    path: internal/cli
+    description: "Command-line interface package from git-outlet"
+    include: ["*.go"]
+    exclude: ["*_test.go"]
+    message: "Update the git-outlet CLI package"
+    mode: copy
+
+  cli-history:
+    path: cmd/git-outlet
+    description: "Command entry point with its full Git history"
+    mode: subtree

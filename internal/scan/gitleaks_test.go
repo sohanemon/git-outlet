@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -157,6 +158,9 @@ func TestClientTreatsOnlyExitOneAsFindings(t *testing.T) {
 }
 
 func TestExecRunnerDoesNotReturnStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake gitleaks shell command is not executable on Windows")
+	}
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh is not installed")
 	}

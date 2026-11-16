@@ -108,6 +108,8 @@ Before publishing, git-outlet blocks suspicious filenames such as `.env`, privat
 | `--config PATH` | Read a different config file. |
 | `--version` | Print version, commit, and build date. |
 
+`-m` applies to every copy-mode folder in the run and overrides entry and settings messages. Gists and subtree entries ignore it. Empty or whitespace-only messages are rejected. During a dry run, changed folders show the message that would be committed; multiline messages show only the first line.
+
 Run the command for your shell. Add it to your shell's startup file to enable completion in future sessions.
 
 ### Bash

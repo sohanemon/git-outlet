@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -107,6 +108,7 @@ type fakeRepositor struct {
 	syncErrFor map[string]error
 	syncs      int
 	lastSync   repo.SyncOptions
+	syncCalls  []repo.SyncOptions
 
 	previewResult repo.Result
 	previewErr    error
@@ -163,6 +165,7 @@ func (f *fakeRepositor) Create(_ context.Context, owner, name, description strin
 func (f *fakeRepositor) Sync(_ context.Context, opts repo.SyncOptions) (repo.Result, error) {
 	f.syncs++
 	f.lastSync = opts
+	f.syncCalls = append(f.syncCalls, opts)
 	if err := f.syncErrFor[opts.Name]; err != nil {
 		return repo.Result{}, err
 	}
@@ -903,6 +906,151 @@ func TestPublishRepoMessagePrecedence(t *testing.T) {
 	}
 }
 
+func TestPublishMessageIgnoredForGistAndSubtree(t *testing.T) {
+	t.Run("gist", func(t *testing.T) {
+		root := newRepo(t)
+		fake := &fakeGister{}
+		out, err := runPublish(t, root, sampleConfig(), fake, func(opts *Options) {
+			opts.Message = "ignored by Gists"
+		})
+		if err != nil {
+			t.Fatalf("Run() error: %v (output %q)", err, out)
+		}
+		if len(fake.creates) != 1 {
+			t.Errorf("Gist creates = %d, want one", len(fake.creates))
+		}
+	})
+
+	t.Run("subtree", func(t *testing.T) {
+		root := newRepo(t)
+		cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app", Mode: "subtree"})
+		repos := newFakeRepositor()
+		repos.splitResult = "0123456789abcdef"
+		out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+			opts.Repos = repos
+			opts.Message = "ignored by subtree"
+		})
+		if err != nil {
+			t.Fatalf("Run() error: %v (output %q)", err, out)
+		}
+		if repos.pushes != 1 {
+			t.Errorf("subtree pushes = %d, want one", repos.pushes)
+		}
+	})
+}
+
+func TestPublishOnlyWithMessage(t *testing.T) {
+	root := newRepo(t)
+	cfg := repoConfig(
+		config.Entry{Name: "app-one", Path: "projects/my-cool-app"},
+		config.Entry{Name: "app-two", Path: "projects/my-cool-app"},
+	)
+	repos := newFakeRepositor()
+	out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+		opts.Repos = repos
+		opts.Only = "app-two"
+		opts.Message = "selected app message"
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v (output %q)", err, out)
+	}
+	if len(repos.syncCalls) != 1 {
+		t.Fatalf("sync calls = %d, want one", len(repos.syncCalls))
+	}
+	if repos.syncCalls[0].Name != "app-two" || repos.syncCalls[0].Message != "selected app message" {
+		t.Errorf("selected sync = %+v, want app-two with message", repos.syncCalls[0])
+	}
+	if strings.Contains(out, "app-one") {
+		t.Errorf("output includes unselected app-one: %q", out)
+	}
+}
+
+func TestPublishMessageAppliesToEveryCopyEntry(t *testing.T) {
+	root := newRepo(t)
+	cfg := repoConfig(
+		config.Entry{Name: "app-one", Path: "projects/my-cool-app"},
+		config.Entry{Name: "app-two", Path: "projects/my-cool-app"},
+	)
+	repos := newFakeRepositor()
+	out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+		opts.Repos = repos
+		opts.Message = "shared release message"
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v (output %q)", err, out)
+	}
+	if len(repos.syncCalls) != 2 {
+		t.Fatalf("sync calls = %d, want two", len(repos.syncCalls))
+	}
+	for _, call := range repos.syncCalls {
+		if call.Message != "shared release message" {
+			t.Errorf("%s message = %q, want shared release message", call.Name, call.Message)
+		}
+	}
+}
+
+func TestPublishDryRunCopyMessages(t *testing.T) {
+	tests := []struct {
+		name        string
+		message     string
+		info        repo.Info
+		preview     repo.Result
+		want        string
+		wantMissing string
+	}{
+		{
+			name:    "would create",
+			message: "Add auth demo",
+			want:    `repo  would create (+2) "Add auth demo"`,
+		},
+		{
+			name:        "would update with first line only",
+			message:     "Add auth demo\nKeep details in history",
+			info:        repo.Info{Exists: true},
+			preview:     repo.Result{URL: "https://github.com/octocat/my-cool-app", Added: 3, Changed: 2, Removed: 1},
+			want:        `repo  would update (+3 ~2 -1) "Add auth demo…"`,
+			wantMissing: "Keep details in history",
+		},
+		{
+			name:        "unchanged omits message",
+			message:     "Add auth demo",
+			info:        repo.Info{Exists: true},
+			want:        "repo  unchanged",
+			wantMissing: "Add auth demo",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newRepo(t)
+			cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app"})
+			if tt.info.Exists {
+				saveRepoState(t, root, "my-cool-app")
+			}
+			repos := newFakeRepositor()
+			repos.info = tt.info
+			repos.previewResult = tt.preview
+			out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+				opts.Repos = repos
+				opts.DryRun = true
+				opts.Message = tt.message
+			})
+			if err != nil {
+				t.Fatalf("Run() error: %v (output %q)", err, out)
+			}
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("output %q does not contain %q", out, tt.want)
+			}
+			if tt.wantMissing != "" && strings.Contains(out, tt.wantMissing) {
+				t.Errorf("output %q unexpectedly contains %q", out, tt.wantMissing)
+			}
+			if repos.syncs != 0 || repos.pushes != 0 || repos.creates != 0 {
+				t.Errorf("dry run writes: syncs=%d pushes=%d creates=%d", repos.syncs, repos.pushes, repos.creates)
+			}
+		})
+	}
+}
+
 func TestPublishSubtreeStateAndDryRun(t *testing.T) {
 	t.Run("create then unchanged", func(t *testing.T) {
 		root := newRepo(t)
@@ -1156,7 +1304,12 @@ func TestPublishRepoDryRun(t *testing.T) {
 			t.Fatalf("Run() error: %v (output %q)", err, out)
 		}
 
-		want := "✔ my-cool-app   repo  would create    +2\n" +
+		short, err := gitx.ShortHead(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		message := "Update from private repo (" + short + ")"
+		want := "✔ my-cool-app   repo  would create (+2) " + strconv.Quote(message) + "\n" +
 			"\n1 would publish, 0 unchanged, 0 skipped, 0 failed\n"
 		if out != want {
 			t.Errorf("output =\n%s\nwant\n%s", out, want)
@@ -1195,7 +1348,12 @@ func TestPublishRepoDryRun(t *testing.T) {
 			t.Fatalf("Run() error: %v (output %q)", err, out)
 		}
 
-		want := "✔ my-cool-app   repo  would update    +1 ~1 -1  https://github.com/octocat/my-cool-app\n" +
+		short, err := gitx.ShortHead(context.Background(), root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		message := "Update from private repo (" + short + ")"
+		want := "✔ my-cool-app   repo  would update (+1 ~1 -1) " + strconv.Quote(message) + "  https://github.com/octocat/my-cool-app\n" +
 			"\n1 would publish, 0 unchanged, 0 skipped, 0 failed\n"
 		if out != want {
 			t.Errorf("output =\n%s\nwant\n%s", out, want)

@@ -50,8 +50,14 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (Result, error) {
 		return Result{}, err
 	}
 
-	commitArgs := []string{"-c", "user.name=" + name, "-c", "user.email=" + email, "commit", "-m", opts.Message}
-	if _, err := c.runner.Run(ctx, prepared.dir, "git", commitArgs...); err != nil {
+	commitArgs := []string{"-c", "user.name=" + name, "-c", "user.email=" + email, "commit", "-F", "-"}
+	runner, ok := c.runner.(interface {
+		RunInput(context.Context, string, string, []byte, ...string) (string, error)
+	})
+	if !ok {
+		return Result{}, errors.New("git runner does not support command input")
+	}
+	if _, err := runner.RunInput(ctx, prepared.dir, "git", []byte(opts.Message), commitArgs...); err != nil {
 		return Result{}, fmt.Errorf("commit %s/%s: %w", opts.Owner, opts.Name, err)
 	}
 

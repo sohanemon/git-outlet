@@ -65,6 +65,10 @@ an outlet.yml configuration. Run it as "git outlet" or "git-outlet".`,
 }
 
 func runPublish(cmd *cobra.Command, opts *options) error {
+	if cmd.Flags().Changed("message") && strings.TrimSpace(opts.message) == "" {
+		return errors.New("--message cannot be empty or whitespace")
+	}
+
 	if !opts.dryRun {
 		if _, err := exec.LookPath("gh"); err != nil {
 			return errors.New("gh is required to publish; install the GitHub CLI and run `gh auth login`")

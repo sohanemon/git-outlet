@@ -57,6 +57,14 @@ func (f *fakeRunner) Run(ctx context.Context, dir, name string, args ...string) 
 	}
 }
 
+func (f *fakeRunner) RunInput(ctx context.Context, dir, name string, input []byte, args ...string) (string, error) {
+	if name == "git" {
+		f.gitCalls = append(f.gitCalls, strings.Join(args, " "))
+	}
+
+	return ExecRunner{}.RunInput(ctx, dir, name, input, args...)
+}
+
 func TestOwner(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -260,6 +268,42 @@ func TestSyncNoChanges(t *testing.T) {
 	}
 	if after := remoteHead(t, bare); after != before {
 		t.Errorf("remote head changed from %s to %s", before, after)
+	}
+	for _, call := range runner.gitCalls {
+		if strings.Contains(call, " commit ") {
+			t.Errorf("Sync() committed despite no changes: %q", call)
+		}
+	}
+}
+
+func TestSyncPreservesCommitMessages(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{name: "multiline", message: "Add auth demo\nKeep the second line"},
+		{name: "shell characters", message: "Use \"quotes\", $HOME, and `date`"},
+		{name: "leading dash", message: "-Add an auth demo"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bare := newBareRepo(t)
+			source := newSourceRepo(t, map[string]string{"a.js": "a"})
+			writeFile(t, source, "a.js", "updated")
+			runGit(t, source, "add", "-A")
+			runGit(t, source, "commit", "-q", "-m", "source update")
+
+			runner := &fakeRunner{remote: bare}
+			if _, err := New(runner).Sync(context.Background(), syncOptions(source, "a", "app", tt.message, "a.js")); err != nil {
+				t.Fatalf("Sync() error: %v", err)
+			}
+
+			got := strings.TrimRight(runGit(t, "", "--git-dir", bare, "log", "-1", "--format=%B"), "\n")
+			if got != tt.message {
+				t.Errorf("remote commit message = %q, want %q", got, tt.message)
+			}
+		})
 	}
 }
 

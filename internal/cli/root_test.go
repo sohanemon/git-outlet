@@ -136,6 +136,32 @@ func TestRootCmd(t *testing.T) {
 	}
 }
 
+func TestPublishRejectsEmptyMessageBeforeWork(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "empty short flag", args: []string{"-m", ""}},
+		{name: "empty long flag", args: []string{"--message="}},
+		{name: "whitespace long flag", args: []string{"--message", " \t\n"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chdir(t, t.TempDir())
+			t.Setenv("PATH", "")
+
+			out, err := runRoot(t, tt.args...)
+			if err == nil || !strings.Contains(err.Error(), "--message cannot be empty or whitespace") {
+				t.Fatalf("error = %v, output %q; want empty-message error", err, out)
+			}
+			if out != "" {
+				t.Errorf("output = %q, want empty", out)
+			}
+		})
+	}
+}
+
 func TestVersionDefaults(t *testing.T) {
 	out, err := runRoot(t, "--version")
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 )
@@ -18,8 +19,17 @@ type Runner interface {
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	return runCommand(ctx, dir, name, nil, args...)
+}
+
+func (ExecRunner) RunInput(ctx context.Context, dir, name string, input []byte, args ...string) (string, error) {
+	return runCommand(ctx, dir, name, bytes.NewReader(input), args...)
+}
+
+func runCommand(ctx context.Context, dir, name string, input io.Reader, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	cmd.Stdin = input
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

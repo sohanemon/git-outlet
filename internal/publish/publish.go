@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/sohanemon/git-outlet/internal/check"
@@ -163,10 +164,11 @@ type result struct {
 }
 
 type repoResult struct {
-	status string
-	delta  string
-	url    string
-	err    error
+	status  string
+	delta   string
+	message string
+	url     string
+	err     error
 }
 
 func (r *run) publish(entry config.Entry, kind check.Kind) {
@@ -214,12 +216,22 @@ func (r *run) publishRepo(entry config.Entry) {
 
 	line := fmt.Sprintf("✔ %-*s  repo  %s", r.width, entry.Name, res.status)
 	if res.delta != "" {
-		line += "    " + res.delta
+		if res.message == "" {
+			line += "    " + res.delta
+		} else {
+			line += " (" + res.delta + ") " + strconv.Quote(previewMessage(res.message))
+		}
+	} else if res.message != "" {
+		line += "    " + strconv.Quote(previewMessage(res.message))
 	}
 	if res.url != "" {
 		if res.delta != "" {
-			if pad := 10 - len(res.delta); pad > 0 {
-				line += strings.Repeat(" ", pad)
+			if res.message == "" {
+				if pad := 10 - len(res.delta); pad > 0 {
+					line += strings.Repeat(" ", pad)
+				}
+			} else {
+				line += "  "
 			}
 		} else {
 			line += "    "
@@ -279,7 +291,7 @@ func (r *run) publishRepoCopy(entry config.Entry) repoResult {
 
 	created := !info.Exists
 	if created && r.opts.DryRun {
-		return repoResult{status: "would create", delta: formatDelta(repo.Result{Added: len(files)})}
+		return repoResult{status: "would create", delta: formatDelta(repo.Result{Added: len(files)}), message: message}
 	}
 	if created {
 		if err := r.opts.Repos.Create(r.ctx, owner, entry.Name, entry.Description); err != nil {
@@ -295,7 +307,7 @@ func (r *run) publishRepoCopy(entry config.Entry) repoResult {
 		if noDelta(preview) {
 			return repoResult{status: "unchanged"}
 		}
-		return repoResult{status: "would update", delta: formatDelta(preview), url: preview.URL}
+		return repoResult{status: "would update", delta: formatDelta(preview), message: message, url: preview.URL}
 	}
 
 	synced, err := r.opts.Repos.Sync(r.ctx, syncOpts)
@@ -763,6 +775,15 @@ func formatDelta(res repo.Result) string {
 	}
 
 	return strings.Join(parts, " ")
+}
+
+func previewMessage(message string) string {
+	line, _, multiline := strings.Cut(message, "\n")
+	if multiline {
+		line = strings.TrimSuffix(line, "\r") + "…"
+	}
+
+	return line
 }
 
 func noDelta(res repo.Result) bool {

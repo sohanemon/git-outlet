@@ -36,8 +36,8 @@ checksum:
 changelog:
   filters:
     exclude:
-      - ^docs:
-      - ^test:
+      - "^docs:"
+      - "^test:"
 
 homebrew_casks:
   - name: git-outlet
@@ -49,3 +49,6 @@ homebrew_casks:
       owner: sohanemon
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+
+release:
+  replace_existing_artifacts: true

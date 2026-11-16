@@ -1,4 +1,11 @@
-# git-outlet
+<h1>
+  <img src="assets/icon.png" alt="" width="60" height="60" valign="middle">
+  git-outlet
+</h1>
+
+<p align="center">
+  <img src="assets/banner.png" alt="Publish selectively: share chosen parts of a private repository as Gists or repositories" width="100%">
+</p>
 
 Publish selected files and folders from any local Git repository as public Gists or repositories. Use it to share part of a private project without publishing the whole source.
 

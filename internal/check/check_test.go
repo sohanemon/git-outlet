@@ -218,7 +218,7 @@ func TestRunProblems(t *testing.T) {
 		},
 		{
 			name:     "absolute path",
-			cfg:      configWith(config.Settings{}, config.Entry{Name: "app", Path: "/tmp"}),
+			cfg:      configWith(config.Settings{}, config.Entry{Name: "app", Path: filepath.Join(filepath.VolumeName(os.TempDir())+string(os.PathSeparator), "tmp")}),
 			wantErrs: []string{`is absolute`},
 		},
 		{

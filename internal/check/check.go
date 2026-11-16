@@ -12,6 +12,7 @@ import (
 
 	"github.com/sohanemon/git-outlet/internal/config"
 	"github.com/sohanemon/git-outlet/internal/gitx"
+	"github.com/sohanemon/git-outlet/internal/scan"
 	"github.com/sohanemon/git-outlet/internal/selection"
 )
 
@@ -74,19 +75,42 @@ func (r Report) count(severity Severity) int {
 	return n
 }
 
+// NOTE: Pass nil Scan to keep checks fast and avoid invoking gitleaks.
+type Options struct {
+	Root string
+	Scan scan.Scanner
+}
+
 // Run checks every entry of cfg against the repository at root.
-func Run(ctx context.Context, cfg *config.Config, root string) (Report, error) {
-	rootResolved, err := filepath.EvalSymlinks(root)
+func Run(ctx context.Context, cfg *config.Config, opts Options) (Report, error) {
+	rootResolved, err := filepath.EvalSymlinks(opts.Root)
 	if err != nil {
-		return Report{}, fmt.Errorf("resolve repository root %q: %w", root, err)
+		return Report{}, fmt.Errorf("resolve repository root %q: %w", opts.Root, err)
 	}
 
 	report := Report{Entries: make([]Entry, 0, len(cfg.Entries))}
 
+	scanner := opts.Scan
+	if !cfg.Settings.SecretScan {
+		scanner = nil
+	}
+	if scanner != nil {
+		if _, err := scanner.Version(ctx); err != nil {
+			if !errors.Is(err, scan.ErrUnavailable) {
+				return Report{}, fmt.Errorf("detect gitleaks: %w", err)
+			}
+			report.Problems = append(report.Problems, Problem{
+				Severity: SeverityWarning,
+				Message:  "secret scan skipped: gitleaks is not installed",
+			})
+			scanner = nil
+		}
+	}
+
 	for _, entry := range cfg.Entries {
 		c := &collector{report: &report, entry: entry.Name}
 		status := Entry{Name: entry.Name}
-		checkEntry(ctx, cfg.Settings, root, rootResolved, entry, &status, c)
+		checkEntry(ctx, cfg.Settings, opts.Root, rootResolved, entry, &status, c, scanner)
 		status.Failed = c.failed
 		report.Entries = append(report.Entries, status)
 	}
@@ -119,7 +143,7 @@ func (c *collector) add(severity Severity, format string, args ...any) {
 
 var repoName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 
-func checkEntry(ctx context.Context, settings config.Settings, root, rootResolved string, entry config.Entry, status *Entry, c *collector) {
+func checkEntry(ctx context.Context, settings config.Settings, root, rootResolved string, entry config.Entry, status *Entry, c *collector, scanner scan.Scanner) {
 	if filepath.IsAbs(entry.Path) {
 		c.errorf("path %q is absolute", entry.Path)
 		return
@@ -180,6 +204,9 @@ func checkEntry(ctx context.Context, settings config.Settings, root, rootResolve
 	if folder && subtree && entry.Message != "" {
 		c.warnf("message is ignored for subtree entries")
 	}
+	if folder && subtree {
+		c.warnf("publishes the full history of %s, including deleted files and old versions", entry.Path)
+	}
 	if !folder {
 		if len(entry.Include) > 0 {
 			c.warnf("include is ignored for file entries")
@@ -205,6 +232,10 @@ func checkEntry(ctx context.Context, settings config.Settings, root, rootResolve
 
 	if !folder {
 		status.Files = 1
+		c.suspicious([]string{entry.Path})
+		if scanner != nil {
+			c.scan(func() ([]scan.Finding, error) { return scanner.File(ctx, resolved, entry.Name) })
+		}
 		return
 	}
 
@@ -235,6 +266,35 @@ func checkEntry(ctx context.Context, settings config.Settings, root, rootResolve
 	status.Excluded = len(included) - len(selected)
 	if len(selected) == 0 {
 		c.errorf("no files selected after include and exclude")
+		return
+	}
+
+	c.suspicious(selected)
+	if scanner != nil {
+		if subtree {
+			c.scan(func() ([]scan.Finding, error) { return scanner.History(ctx, root, rel) })
+		} else {
+			source := filepath.Join(root, filepath.FromSlash(rel))
+			c.scan(func() ([]scan.Finding, error) { return scanner.Files(ctx, source, selected) })
+		}
+	}
+}
+
+func (c *collector) suspicious(files []string) {
+	for _, file := range scan.Suspicious(files) {
+		c.warnf("suspicious file selected: %s", file)
+	}
+}
+
+func (c *collector) scan(run func() ([]scan.Finding, error)) {
+	findings, err := run()
+	if err != nil {
+		c.errorf("scan: %v", err)
+		return
+	}
+
+	for _, finding := range findings {
+		c.errorf("secret found: %s", finding)
 	}
 }
 

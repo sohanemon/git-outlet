@@ -9,7 +9,30 @@ import (
 	"testing"
 
 	"github.com/sohanemon/git-outlet/internal/config"
+	"github.com/sohanemon/git-outlet/internal/scan"
 )
+
+type fakeScanner struct {
+	versions int
+	findings []scan.Finding
+}
+
+func (f *fakeScanner) Version(context.Context) (string, error) {
+	f.versions++
+	return "8.19", nil
+}
+
+func (f *fakeScanner) File(context.Context, string, string) ([]scan.Finding, error) {
+	return f.findings, nil
+}
+
+func (f *fakeScanner) Files(context.Context, string, []string) ([]scan.Finding, error) {
+	return f.findings, nil
+}
+
+func (f *fakeScanner) History(context.Context, string, string) ([]scan.Finding, error) {
+	return f.findings, nil
+}
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
@@ -74,7 +97,7 @@ func configWith(settings config.Settings, entries ...config.Entry) *config.Confi
 func run(t *testing.T, root string, cfg *config.Config) Report {
 	t.Helper()
 
-	report, err := Run(context.Background(), cfg, root)
+	report, err := Run(context.Background(), cfg, Options{Root: root})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
@@ -139,6 +162,40 @@ func TestRunValid(t *testing.T) {
 	if folder.Kind != KindRepo || folder.Files != 1 || folder.Excluded != 1 || folder.Failed {
 		t.Errorf("folder entry = %+v, want repo with 1 file and 1 excluded", folder)
 	}
+}
+
+func TestSecretScanDisabledInSettings(t *testing.T) {
+	root := newRepo(t)
+	scanner := &fakeScanner{}
+	cfg := configWith(config.Settings{Mode: "copy", SecretScan: false},
+		config.Entry{Name: "file", Path: "file.txt"},
+	)
+	if _, err := Run(context.Background(), cfg, Options{Root: root, Scan: scanner}); err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if scanner.versions != 0 {
+		t.Errorf("Version() calls = %d, want none", scanner.versions)
+	}
+}
+
+func TestCheckReportsSuspiciousNamesAndScanFindings(t *testing.T) {
+	root := newRepo(t)
+	writeFile(t, root, ".env", "fake")
+	runGit(t, root, "add", ".env")
+	runGit(t, root, "commit", "-q", "-m", "environment")
+	scanner := &fakeScanner{findings: []scan.Finding{{RuleID: "fake-rule", File: ".env", Line: 1, Commit: "abcdef123456"}}}
+	cfg := configWith(config.Settings{Mode: "copy", SecretScan: true},
+		config.Entry{Name: "environment", Path: ".env"},
+	)
+	report, err := Run(context.Background(), cfg, Options{Root: root, Scan: scanner})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if report.Warnings() != 1 || report.Errors() != 1 {
+		t.Fatalf("report counts = %d errors, %d warnings", report.Errors(), report.Warnings())
+	}
+	assertProblems(t, report, SeverityWarning, []string{"suspicious file selected: .env"})
+	assertProblems(t, report, SeverityError, []string{"fake-rule  .env:1  abcdef123456"})
 }
 
 func TestRunProblems(t *testing.T) {
@@ -224,6 +281,7 @@ func TestRunProblems(t *testing.T) {
 			name:     "subtree with include",
 			cfg:      configWith(config.Settings{}, config.Entry{Name: "app", Path: "app", Mode: "subtree", Include: []string{"*.js"}}),
 			wantErrs: []string{`cannot use include or exclude`},
+			wantWarn: []string{`publishes the full history of app, including deleted files and old versions`},
 		},
 		{
 			name: "unmatched include and exclude",
@@ -242,7 +300,7 @@ func TestRunProblems(t *testing.T) {
 		{
 			name:     "message on subtree entry",
 			cfg:      configWith(config.Settings{}, config.Entry{Name: "app", Path: "app", Mode: "subtree", Message: "hi"}),
-			wantWarn: []string{`message is ignored for subtree entries`},
+			wantWarn: []string{`message is ignored for subtree entries`, `publishes the full history of app, including deleted files and old versions`},
 		},
 		{
 			name:     "skipped symlink in folder",

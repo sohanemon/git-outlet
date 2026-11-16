@@ -12,18 +12,21 @@ import (
 	"github.com/sohanemon/git-outlet/internal/check"
 	"github.com/sohanemon/git-outlet/internal/config"
 	"github.com/sohanemon/git-outlet/internal/gitx"
+	"github.com/sohanemon/git-outlet/internal/scan"
 )
 
 func newCheckCmd() *cobra.Command {
 	var configPath string
+	var scanEnabled bool
 
 	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "Verify the outlet configuration and tracked files",
 		Long: `check reads outlet.yml at the repository root, validates every entry against
 the files tracked by git, and reports problems and warnings. No files are
-published.`,
+published. With --scan it also runs gitleaks over the selected files and history.`,
 		Example: `  git-outlet check
+  git-outlet check --scan
   git outlet check`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -37,7 +40,12 @@ published.`,
 				path = configPath
 			}
 
-			report, err := runChecks(cmd, path, root)
+			var scanner scan.Scanner
+			if scanEnabled {
+				scanner = scan.New(scan.ExecRunner{})
+			}
+
+			report, err := runChecks(cmd, path, root, scanner)
 			if err != nil {
 				return err
 			}
@@ -53,11 +61,12 @@ published.`,
 	}
 
 	cmd.Flags().StringVar(&configPath, "config", "outlet.yml", "path to the outlet configuration file")
+	cmd.Flags().BoolVar(&scanEnabled, "scan", false, "scan selected files and history with gitleaks")
 
 	return cmd
 }
 
-func runChecks(cmd *cobra.Command, path, root string) (check.Report, error) {
+func runChecks(cmd *cobra.Command, path, root string, scanner scan.Scanner) (check.Report, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
 		var cfgErr *config.Error
@@ -76,7 +85,7 @@ func runChecks(cmd *cobra.Command, path, root string) (check.Report, error) {
 		return report, nil
 	}
 
-	return check.Run(cmd.Context(), cfg, root)
+	return check.Run(cmd.Context(), cfg, check.Options{Root: root, Scan: scanner})
 }
 
 func writeReport(w io.Writer, report check.Report) error {

@@ -15,8 +15,38 @@ import (
 	"github.com/sohanemon/git-outlet/internal/gist"
 	"github.com/sohanemon/git-outlet/internal/gitx"
 	"github.com/sohanemon/git-outlet/internal/repo"
+	"github.com/sohanemon/git-outlet/internal/scan"
 	"github.com/sohanemon/git-outlet/internal/state"
 )
+
+type fakeScanner struct {
+	versions     int
+	versionErr   error
+	fileFindings map[string][]scan.Finding
+	fileCalls    []string
+	filesCalls   [][]string
+	historyCalls []string
+}
+
+func (f *fakeScanner) Version(context.Context) (string, error) {
+	f.versions++
+	return "8.19", f.versionErr
+}
+
+func (f *fakeScanner) File(_ context.Context, _, name string) ([]scan.Finding, error) {
+	f.fileCalls = append(f.fileCalls, name)
+	return f.fileFindings[name], nil
+}
+
+func (f *fakeScanner) Files(_ context.Context, _ string, files []string) ([]scan.Finding, error) {
+	f.filesCalls = append(f.filesCalls, append([]string(nil), files...))
+	return nil, nil
+}
+
+func (f *fakeScanner) History(_ context.Context, _, path string) ([]scan.Finding, error) {
+	f.historyCalls = append(f.historyCalls, path)
+	return nil, nil
+}
 
 type createCall struct {
 	Name        string
@@ -81,6 +111,16 @@ type fakeRepositor struct {
 	previewResult repo.Result
 	previewErr    error
 	previews      int
+
+	splitResult   string
+	splitErr      error
+	splits        int
+	lastSplitRoot string
+	lastSplitPath string
+
+	pushErr  error
+	pushes   int
+	lastPush repo.SubtreeOptions
 }
 
 func newFakeRepositor() *fakeRepositor {
@@ -137,6 +177,21 @@ func (f *fakeRepositor) Preview(_ context.Context, opts repo.SyncOptions) (repo.
 	return f.previewResult, f.previewErr
 }
 
+func (f *fakeRepositor) SubtreeSplit(_ context.Context, root, path string) (string, error) {
+	f.splits++
+	f.lastSplitRoot = root
+	f.lastSplitPath = path
+
+	return f.splitResult, f.splitErr
+}
+
+func (f *fakeRepositor) SubtreePush(_ context.Context, opts repo.SubtreeOptions) error {
+	f.pushes++
+	f.lastPush = opts
+
+	return f.pushErr
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
@@ -187,7 +242,6 @@ func sampleConfig() *config.Config {
 		Settings: config.Settings{Mode: "copy"},
 		Entries: []config.Entry{
 			{Name: "helpers.js", Path: "src/helpers.js"},
-			{Name: "my-cool-app", Path: "projects/my-cool-app", Mode: "subtree"},
 		},
 	}
 }
@@ -227,9 +281,8 @@ func TestPublishCreateUpdateUnchanged(t *testing.T) {
 		t.Errorf("create = %+v", got)
 	}
 
-	want := "✔ helpers.js    gist  created    https://gist.github.com/gist1\n" +
-		"- my-cool-app   repo  skipped (subtree not implemented yet)\n" +
-		"\n1 published, 0 unchanged, 1 skipped, 0 failed\n"
+	want := "✔ helpers.js   gist  created    https://gist.github.com/gist1\n" +
+		"\n1 published, 0 unchanged, 0 skipped, 0 failed\n"
 	if out != want {
 		t.Errorf("output =\n%s\nwant\n%s", out, want)
 	}
@@ -257,8 +310,8 @@ func TestPublishCreateUpdateUnchanged(t *testing.T) {
 		t.Errorf("update = %+v", got)
 	}
 	for _, want := range []string{
-		"✔ helpers.js    gist  updated    https://gist.github.com/gist1",
-		"1 published, 0 unchanged, 1 skipped, 0 failed",
+		"✔ helpers.js   gist  updated    https://gist.github.com/gist1",
+		"1 published, 0 unchanged, 0 skipped, 0 failed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q does not contain %q", out, want)
@@ -274,8 +327,8 @@ func TestPublishCreateUpdateUnchanged(t *testing.T) {
 		t.Errorf("calls = %d, want none", unchanged.calls)
 	}
 	for _, want := range []string{
-		"✔ helpers.js    gist  unchanged",
-		"0 published, 1 unchanged, 1 skipped, 0 failed",
+		"✔ helpers.js   gist  unchanged",
+		"0 published, 1 unchanged, 0 skipped, 0 failed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q does not contain %q", out, want)
@@ -364,10 +417,8 @@ func TestPublishOnlyUnknown(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run() error = nil, want an unknown entry error")
 	}
-	for _, want := range []string{`unknown entry "nope"`, "helpers.js, my-cool-app"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not contain %q", err, want)
-		}
+	if !strings.Contains(err.Error(), `unknown entry "nope"`) || !strings.Contains(err.Error(), "helpers.js") {
+		t.Errorf("error %q does not list the valid entries", err)
 	}
 	if fake.calls != 0 {
 		t.Errorf("calls = %d, want none", fake.calls)
@@ -446,9 +497,8 @@ func TestPublishDryRun(t *testing.T) {
 			t.Errorf("calls = %d, want none", fake.calls)
 		}
 
-		want := "✔ helpers.js    gist  would create\n" +
-			"- my-cool-app   repo  skipped (subtree not implemented yet)\n" +
-			"\n1 would publish, 0 unchanged, 1 skipped, 0 failed\n"
+		want := "✔ helpers.js   gist  would create\n" +
+			"\n1 would publish, 0 unchanged, 0 skipped, 0 failed\n"
 		if out != want {
 			t.Errorf("output =\n%s\nwant\n%s", out, want)
 		}
@@ -478,8 +528,8 @@ func TestPublishDryRun(t *testing.T) {
 			t.Errorf("calls = %d, want none", fake.calls)
 		}
 		for _, want := range []string{
-			"✔ helpers.js    gist  would update    https://gist.github.com/abc123",
-			"1 would publish, 0 unchanged, 1 skipped, 0 failed",
+			"✔ helpers.js   gist  would update    https://gist.github.com/abc123",
+			"1 would publish, 0 unchanged, 0 skipped, 0 failed",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output %q does not contain %q", out, want)
@@ -509,8 +559,8 @@ func TestPublishDryRun(t *testing.T) {
 			t.Fatalf("Run() error: %v (output %q)", err, out)
 		}
 		for _, want := range []string{
-			"✔ helpers.js    gist  unchanged",
-			"0 would publish, 1 unchanged, 1 skipped, 0 failed",
+			"✔ helpers.js   gist  unchanged",
+			"0 would publish, 1 unchanged, 0 skipped, 0 failed",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output %q does not contain %q", out, want)
@@ -851,6 +901,245 @@ func TestPublishRepoMessagePrecedence(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPublishSubtreeStateAndDryRun(t *testing.T) {
+	t.Run("create then unchanged", func(t *testing.T) {
+		root := newRepo(t)
+		cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app", Mode: "subtree"})
+		repos := newFakeRepositor()
+		repos.splitResult = "0123456789abcdef"
+
+		out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) { opts.Repos = repos })
+		if err != nil {
+			t.Fatalf("first Run() error: %v (output %q)", err, out)
+		}
+		if repos.creates != 1 || repos.pushes != 1 || repos.lastPush.Commit != repos.splitResult {
+			t.Fatalf("create/push calls = %d/%d, push = %+v", repos.creates, repos.pushes, repos.lastPush)
+		}
+		st, err := state.Load(statePath(root))
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		entry, ok := st.Get("my-cool-app")
+		if !ok || entry.Repo == nil || entry.Repo.Commit != repos.splitResult {
+			t.Fatalf("saved subtree state = %+v, ok = %v", entry, ok)
+		}
+
+		repos = newFakeRepositor()
+		repos.info = repo.Info{Exists: true}
+		repos.splitResult = "0123456789abcdef"
+		out, err = runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) { opts.Repos = repos })
+		if err != nil {
+			t.Fatalf("second Run() error: %v (output %q)", err, out)
+		}
+		if repos.pushes != 0 || !strings.Contains(out, "repo  unchanged") {
+			t.Errorf("second run output = %q, pushes = %d", out, repos.pushes)
+		}
+
+		repos = newFakeRepositor()
+		repos.info = repo.Info{Exists: true}
+		repos.splitResult = "fedcba9876543210"
+		out, err = runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) { opts.Repos = repos })
+		if err != nil {
+			t.Fatalf("updated Run() error: %v (output %q)", err, out)
+		}
+		if repos.pushes != 1 || !strings.Contains(out, "repo  updated") {
+			t.Errorf("updated run output = %q, pushes = %d", out, repos.pushes)
+		}
+	})
+
+	t.Run("dry run does not create push or save state", func(t *testing.T) {
+		root := newRepo(t)
+		cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app", Mode: "subtree"})
+		repos := newFakeRepositor()
+		repos.splitResult = "0123456789abcdef"
+
+		out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+			opts.Repos = repos
+			opts.DryRun = true
+		})
+		if err != nil {
+			t.Fatalf("Run() error: %v (output %q)", err, out)
+		}
+		if repos.creates != 0 || repos.pushes != 0 || !strings.Contains(out, "would create") {
+			t.Errorf("output = %q; creates = %d, pushes = %d", out, repos.creates, repos.pushes)
+		}
+		if _, err := os.Stat(statePath(root)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("state file exists after dry run: %v", err)
+		}
+	})
+
+	t.Run("private repo is rejected before push", func(t *testing.T) {
+		root := newRepo(t)
+		cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app", Mode: "subtree"})
+		repos := newFakeRepositor()
+		repos.info = repo.Info{Exists: true, Private: true}
+		repos.splitResult = "0123456789abcdef"
+
+		out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) { opts.Repos = repos })
+		if err == nil || !strings.Contains(err.Error(), "only publishes to public repositories") {
+			t.Fatalf("Run() error = %v, output %q", err, out)
+		}
+		if repos.pushes != 0 || repos.creates != 0 {
+			t.Errorf("private repo calls: creates=%d pushes=%d", repos.creates, repos.pushes)
+		}
+	})
+}
+
+func TestPublishSecretScanAndSuspiciousOverride(t *testing.T) {
+	t.Run("finding blocks only its gist", func(t *testing.T) {
+		root := newRepo(t)
+		writeFile(t, root, "src/notes.md", "notes")
+		runGit(t, root, "add", "src/notes.md")
+		runGit(t, root, "commit", "-q", "-m", "notes")
+		cfg := &config.Config{
+			Settings: config.Settings{Mode: "copy", SecretScan: true},
+			Entries: []config.Entry{
+				{Name: "helpers.js", Path: "src/helpers.js"},
+				{Name: "notes.md", Path: "src/notes.md"},
+			},
+		}
+		scanner := &fakeScanner{fileFindings: map[string][]scan.Finding{
+			"helpers.js": {{RuleID: "fake-rule", File: "helpers.js", Line: 2}},
+		}}
+		gister := &fakeGister{}
+		out, err := runPublish(t, root, cfg, gister, func(opts *Options) { opts.Scan = scanner })
+		if err == nil || !strings.Contains(out, "secret scan found 1 issue") {
+			t.Fatalf("Run() error = %v, output %q", err, out)
+		}
+		if len(gister.creates) != 1 || gister.creates[0].Name != "notes.md" {
+			t.Errorf("created Gists = %+v, want only notes.md", gister.creates)
+		}
+		if strings.Contains(out, "PLANTED_FAKE_SECRET") {
+			t.Fatal("publish output contains matched text")
+		}
+	})
+
+	t.Run("allow suspicious does not bypass gitleaks", func(t *testing.T) {
+		root := newRepo(t)
+		writeFile(t, root, ".env", "PLANTED_FAKE_SECRET")
+		runGit(t, root, "add", ".env")
+		runGit(t, root, "commit", "-q", "-m", "env")
+		cfg := &config.Config{
+			Settings: config.Settings{Mode: "copy", SecretScan: true},
+			Entries:  []config.Entry{{Name: "environment", Path: ".env"}},
+		}
+		gister := &fakeGister{}
+		scanner := &fakeScanner{fileFindings: map[string][]scan.Finding{
+			"environment": {{RuleID: "fake-rule", File: ".env", Line: 1}},
+		}}
+		out, err := runPublish(t, root, cfg, gister, func(opts *Options) {
+			opts.AllowSuspicious = true
+			opts.Scan = scanner
+		})
+		if err == nil || !strings.Contains(out, "allowed suspicious file .env") || !strings.Contains(out, "secret scan found 1 issue") {
+			t.Fatalf("Run() error = %v, output %q", err, out)
+		}
+		if len(gister.creates) != 0 {
+			t.Errorf("created Gists = %+v, want none", gister.creates)
+		}
+	})
+
+	t.Run("disabled secret scan still blocks suspicious names", func(t *testing.T) {
+		root := newRepo(t)
+		writeFile(t, root, ".env", "fake")
+		runGit(t, root, "add", ".env")
+		runGit(t, root, "commit", "-q", "-m", "env")
+		cfg := &config.Config{
+			Settings: config.Settings{Mode: "copy", SecretScan: false},
+			Entries:  []config.Entry{{Name: "environment", Path: ".env"}},
+		}
+		scanner := &fakeScanner{}
+		out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) { opts.Scan = scanner })
+		if err == nil || !strings.Contains(out, "suspicious files selected") {
+			t.Fatalf("Run() error = %v, output %q", err, out)
+		}
+		if scanner.versions != 0 {
+			t.Errorf("Version() calls = %d, want none", scanner.versions)
+		}
+	})
+
+	t.Run("allow suspicious publishes when gitleaks finds nothing", func(t *testing.T) {
+		root := newRepo(t)
+		writeFile(t, root, ".env", "fake")
+		runGit(t, root, "add", ".env")
+		runGit(t, root, "commit", "-q", "-m", "env")
+		cfg := &config.Config{
+			Settings: config.Settings{Mode: "copy", SecretScan: true},
+			Entries:  []config.Entry{{Name: "environment", Path: ".env"}},
+		}
+		gister := &fakeGister{}
+		scanner := &fakeScanner{}
+		out, err := runPublish(t, root, cfg, gister, func(opts *Options) {
+			opts.AllowSuspicious = true
+			opts.Scan = scanner
+		})
+		if err != nil {
+			t.Fatalf("Run() error: %v (output %q)", err, out)
+		}
+		if len(gister.creates) != 1 || !strings.Contains(out, "allowed suspicious file .env") {
+			t.Errorf("created = %+v, output = %q", gister.creates, out)
+		}
+	})
+
+	t.Run("missing gitleaks warns once", func(t *testing.T) {
+		root := newRepo(t)
+		cfg := &config.Config{
+			Settings: config.Settings{Mode: "copy", SecretScan: true},
+			Entries: []config.Entry{
+				{Name: "helpers.js", Path: "src/helpers.js"},
+				{Name: "readme.md", Path: "projects/my-cool-app/README.md"},
+			},
+		}
+		scanner := &fakeScanner{versionErr: scan.ErrUnavailable}
+		out, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+			opts.Scan = scanner
+			opts.DryRun = true
+		})
+		if err != nil {
+			t.Fatalf("dry-run error: %v", err)
+		}
+		if strings.Count(out, "secret scan skipped: gitleaks is not installed") != 1 {
+			t.Errorf("missing-binary warning count in %q", out)
+		}
+	})
+
+	t.Run("copy scans exactly selected files", func(t *testing.T) {
+		root := newRepo(t)
+		cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app", Include: []string{"README.md"}})
+		cfg.Settings.SecretScan = true
+		scanner := &fakeScanner{}
+		_, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+			opts.Repos = newFakeRepositor()
+			opts.Scan = scanner
+		})
+		if err != nil {
+			t.Fatalf("Run() error: %v", err)
+		}
+		if len(scanner.filesCalls) != 1 || strings.Join(scanner.filesCalls[0], ",") != "README.md" {
+			t.Errorf("scanned files = %v, want only README.md", scanner.filesCalls)
+		}
+	})
+
+	t.Run("subtree scans history", func(t *testing.T) {
+		root := newRepo(t)
+		cfg := repoConfig(config.Entry{Name: "my-cool-app", Path: "projects/my-cool-app", Mode: "subtree"})
+		cfg.Settings.SecretScan = true
+		scanner := &fakeScanner{}
+		repos := newFakeRepositor()
+		repos.splitResult = "0123456789abcdef"
+		_, err := runPublish(t, root, cfg, &fakeGister{}, func(opts *Options) {
+			opts.Repos = repos
+			opts.Scan = scanner
+		})
+		if err != nil {
+			t.Fatalf("Run() error: %v", err)
+		}
+		if len(scanner.historyCalls) != 1 || scanner.historyCalls[0] != "projects/my-cool-app" {
+			t.Errorf("history scans = %v", scanner.historyCalls)
+		}
+	})
 }
 
 func TestPublishRepoDryRun(t *testing.T) {

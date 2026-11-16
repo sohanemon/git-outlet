@@ -257,7 +257,11 @@ func TestCheckMissingConfig(t *testing.T) {
 
 func TestPublishDryRunOutput(t *testing.T) {
 	root := newCheckRepo(t)
-	writeRepoFile(t, root, "outlet.yml", `publish:
+	skipWithoutSubtree(t)
+	setMissingGH(t)
+	writeRepoFile(t, root, "outlet.yml", `settings:
+  owner: octocat
+publish:
   helpers.js: src/helpers.js
   my-cool-app:
     path: projects/my-cool-app
@@ -270,13 +274,33 @@ func TestPublishDryRunOutput(t *testing.T) {
 		t.Fatalf("unexpected error: %v (output %q)", err, out)
 	}
 
-	want := `✔ helpers.js    gist  would create
-- my-cool-app   repo  skipped (subtree not implemented yet)
+	for _, want := range []string{
+		"✔ helpers.js    gist  would create",
+		"✔ my-cool-app   repo  would create",
+		"2 would publish, 0 unchanged, 0 skipped, 0 failed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q does not contain %q", out, want)
+		}
+	}
+}
 
-1 would publish, 0 unchanged, 1 skipped, 0 failed
-`
-	if out != want {
-		t.Errorf("output =\n%s\nwant\n%s", out, want)
+func setMissingGH(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho 'Not Found (HTTP 404)' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func skipWithoutSubtree(t *testing.T) {
+	t.Helper()
+
+	if err := exec.Command("git", "subtree").Run(); err != nil {
+		t.Skip("git subtree is not installed")
 	}
 }
 

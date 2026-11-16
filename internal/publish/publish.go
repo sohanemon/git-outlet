@@ -16,47 +16,52 @@ import (
 	"github.com/sohanemon/git-outlet/internal/gist"
 	"github.com/sohanemon/git-outlet/internal/gitx"
 	"github.com/sohanemon/git-outlet/internal/repo"
+	"github.com/sohanemon/git-outlet/internal/scan"
 	"github.com/sohanemon/git-outlet/internal/selection"
 	"github.com/sohanemon/git-outlet/internal/state"
 )
 
 const stateFile = ".git-outlet-state.json"
 
-// NOTE: Gister creates and updates the Gists backing file entries.
+// NOTE: Use Gister to keep Gist operations replaceable during publish runs.
 type Gister interface {
 	Create(ctx context.Context, name, description, content string) (id, url string, err error)
 	Update(ctx context.Context, id, name, description, content string) (url string, err error)
 }
 
-// NOTE: Repositor abstracts repository calls so the publish loop is testable.
+// NOTE: Abstract repository calls so tests can exercise publishing without GitHub.
 type Repositor interface {
 	Owner(ctx context.Context, settingsOwner string) (string, error)
 	Inspect(ctx context.Context, owner, name string) (repo.Info, error)
 	Create(ctx context.Context, owner, name, description string) error
 	Sync(ctx context.Context, opts repo.SyncOptions) (repo.Result, error)
 	Preview(ctx context.Context, opts repo.SyncOptions) (repo.Result, error)
+	SubtreeSplit(ctx context.Context, root, path string) (string, error)
+	SubtreePush(ctx context.Context, opts repo.SubtreeOptions) error
 }
 
-// NOTE: Options controls one publish run.
+// NOTE: Bundle run inputs so publish dependencies stay explicit.
 type Options struct {
-	Config  *config.Config
-	Root    string
-	DryRun  bool
-	Only    string
-	Adopt   bool
-	Message string
-	Out     io.Writer
-	Gist    Gister
-	Repos   Repositor
+	Config          *config.Config
+	Root            string
+	DryRun          bool
+	Only            string
+	Adopt           bool
+	AllowSuspicious bool
+	Message         string
+	Out             io.Writer
+	Gist            Gister
+	Repos           Repositor
+	Scan            scan.Scanner
 }
 
-// NOTE: Run publishes the selected entries, continuing after per-entry failures.
+// NOTE: Continue after per-entry failures so independent entries still publish.
 func Run(ctx context.Context, opts Options) error {
 	if err := validateOnly(opts.Config, opts.Only); err != nil {
 		return err
 	}
 
-	report, err := check.Run(ctx, opts.Config, opts.Root)
+	report, err := check.Run(ctx, opts.Config, check.Options{Root: opts.Root})
 	if err != nil {
 		return err
 	}
@@ -83,12 +88,25 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
+	scanning := false
+	if opts.Config.Settings.SecretScan && opts.Scan != nil {
+		switch _, err := opts.Scan.Version(ctx); {
+		case errors.Is(err, scan.ErrUnavailable):
+			out.WriteString("⚠ secret scan skipped: gitleaks is not installed\n\n")
+		case err != nil:
+			return fmt.Errorf("detect gitleaks: %w", err)
+		default:
+			scanning = true
+		}
+	}
+
 	r := &run{
 		ctx:       ctx,
 		opts:      opts,
 		state:     st,
 		statePath: filepath.Join(opts.Root, stateFile),
 		width:     nameWidth(opts.Config, opts.Only) + 1,
+		scanning:  scanning,
 		out:       &out,
 	}
 
@@ -119,6 +137,7 @@ type run struct {
 	state     state.State
 	statePath string
 	width     int
+	scanning  bool
 	out       *strings.Builder
 	counts    counts
 	failures  []error
@@ -158,9 +177,7 @@ func (r *run) publish(entry config.Entry, kind check.Kind) {
 
 	res := r.publishFile(entry)
 	if res.err != nil {
-		fmt.Fprintf(r.out, "✖ %-*s  gist  %s\n", r.width, entry.Name, failureMessage(entry.Name, res.err))
-		r.failures = append(r.failures, fmt.Errorf("%s: %w", entry.Name, res.err))
-		r.counts.failed++
+		r.fail(entry.Name, "gist", failureMessage(entry.Name, res.err), res.err)
 		return
 	}
 
@@ -182,17 +199,16 @@ func (r *run) publishRepo(entry config.Entry) {
 	if mode == "" {
 		mode = r.opts.Config.Settings.Mode
 	}
+
+	var res repoResult
 	if mode == "subtree" {
-		fmt.Fprintf(r.out, "- %-*s  repo  skipped (subtree not implemented yet)\n", r.width, entry.Name)
-		r.counts.skipped++
-		return
+		res = r.publishRepoSubtree(entry)
+	} else {
+		res = r.publishRepoCopy(entry)
 	}
 
-	res := r.publishRepoCopy(entry)
 	if res.err != nil {
-		fmt.Fprintf(r.out, "✖ %-*s  repo  failed: %s\n", r.width, entry.Name, shortReason(res.err))
-		r.failures = append(r.failures, fmt.Errorf("%s: %w", entry.Name, res.err))
-		r.counts.failed++
+		r.fail(entry.Name, "repo", shortReason(res.err), res.err)
 		return
 	}
 
@@ -229,20 +245,21 @@ func (r *run) publishRepoCopy(entry config.Entry) repoResult {
 		return repoResult{err: err}
 	}
 
+	rel := filepath.ToSlash(filepath.Clean(entry.Path))
 	files, err := r.selectedFiles(entry)
 	if err != nil {
 		return repoResult{err: err}
 	}
-
-	info, err := r.opts.Repos.Inspect(r.ctx, owner, entry.Name)
-	if err != nil {
+	if err := r.guardSuspicious(entry.Name, files); err != nil {
 		return repoResult{err: err}
 	}
-	if info.Private {
-		return repoResult{err: fmt.Errorf("repo %s/%s is private; git-outlet only publishes to public repositories", owner, entry.Name)}
+	if err := r.scanFiles(entry.Name, rel, files); err != nil {
+		return repoResult{err: err}
 	}
-	if info.Exists && !info.Empty && !r.recordedRepo(entry.Name, owner) && !r.opts.Adopt {
-		return repoResult{err: fmt.Errorf("repo %s/%s already exists and was not created by git-outlet; pass --adopt to take it over", owner, entry.Name)}
+
+	info, err := r.inspectRepo(owner, entry.Name)
+	if err != nil {
+		return repoResult{err: err}
 	}
 
 	message, err := r.entryMessage(entry)
@@ -250,13 +267,13 @@ func (r *run) publishRepoCopy(entry config.Entry) repoResult {
 		return repoResult{err: err}
 	}
 
-	rel := filepath.ToSlash(filepath.Clean(entry.Path))
+	source := filepath.Join(r.opts.Root, filepath.FromSlash(rel))
 	syncOpts := repo.SyncOptions{
 		Owner:   owner,
 		Name:    entry.Name,
 		Branch:  r.opts.Config.Settings.Branch,
 		Message: message,
-		Source:  filepath.Join(r.opts.Root, filepath.FromSlash(rel)),
+		Source:  source,
 		Files:   files,
 	}
 
@@ -303,8 +320,113 @@ func (r *run) publishRepoCopy(entry config.Entry) repoResult {
 	return repoResult{status: status, delta: formatDelta(synced), url: synced.URL}
 }
 
+func (r *run) publishRepoSubtree(entry config.Entry) repoResult {
+	if r.opts.Repos == nil {
+		return repoResult{err: errors.New("repo publisher is not configured")}
+	}
+
+	owner, err := r.repoOwner()
+	if err != nil {
+		return repoResult{err: err}
+	}
+
+	rel := filepath.ToSlash(filepath.Clean(entry.Path))
+	files, err := r.selectedFiles(entry)
+	if err != nil {
+		return repoResult{err: err}
+	}
+	if err := r.guardSuspicious(entry.Name, files); err != nil {
+		return repoResult{err: err}
+	}
+	if err := r.scanHistory(entry.Name, rel); err != nil {
+		return repoResult{err: err}
+	}
+
+	commit, err := r.opts.Repos.SubtreeSplit(r.ctx, r.opts.Root, rel)
+	if err != nil {
+		return repoResult{err: err}
+	}
+
+	short := shortCommit(commit)
+	recorded := r.recordedCommit(entry.Name, owner)
+	info, err := r.inspectRepo(owner, entry.Name)
+	if err != nil {
+		return repoResult{err: err}
+	}
+
+	// NOTE: Skip creation and pushes during dry runs while still checking destination safety.
+	if r.opts.DryRun {
+		switch {
+		case recorded == commit && info.Exists && !info.Empty:
+			return repoResult{status: "unchanged"}
+		case !info.Exists:
+			return repoResult{status: "would create", delta: short}
+		default:
+			return repoResult{status: "would update", delta: short, url: repoURL(owner, entry.Name)}
+		}
+	}
+
+	if recorded == commit && info.Exists && !info.Empty {
+		if err := r.saveRepo(entry.Name, owner, commit); err != nil {
+			return repoResult{err: err}
+		}
+		return repoResult{status: "unchanged"}
+	}
+
+	created := !info.Exists
+	if created {
+		if err := r.opts.Repos.Create(r.ctx, owner, entry.Name, entry.Description); err != nil {
+			return repoResult{err: err}
+		}
+	}
+
+	pushOpts := repo.SubtreeOptions{
+		Root:   r.opts.Root,
+		Owner:  owner,
+		Name:   entry.Name,
+		Branch: r.opts.Config.Settings.Branch,
+		Commit: commit,
+	}
+	if err := r.opts.Repos.SubtreePush(r.ctx, pushOpts); err != nil {
+		return repoResult{err: err}
+	}
+	if err := r.saveRepo(entry.Name, owner, commit); err != nil {
+		return repoResult{err: err}
+	}
+
+	status := "updated"
+	if created {
+		status = "created"
+	}
+
+	return repoResult{status: status, delta: short, url: repoURL(owner, entry.Name)}
+}
+
+// NOTE: Apply public-only and foreign-repo guards consistently across repository modes.
+func (r *run) inspectRepo(owner, name string) (repo.Info, error) {
+	info, err := r.opts.Repos.Inspect(r.ctx, owner, name)
+	if err != nil {
+		return repo.Info{}, err
+	}
+	if info.Private {
+		return repo.Info{}, fmt.Errorf("repo %s/%s is private; git-outlet only publishes to public repositories", owner, name)
+	}
+	if info.Exists && !info.Empty && !r.recordedRepo(name, owner) && !r.opts.Adopt {
+		return repo.Info{}, fmt.Errorf("repo %s/%s already exists and was not created by git-outlet; pass --adopt to take it over", owner, name)
+	}
+
+	return info, nil
+}
+
 func (r *run) publishFile(entry config.Entry) result {
 	path := filepath.Join(r.opts.Root, filepath.FromSlash(filepath.Clean(entry.Path)))
+	if err := r.guardSuspicious(entry.Name, []string{entry.Path}); err != nil {
+		return result{err: err}
+	}
+	if err := r.scanFile(entry.Name, path); err != nil {
+		return result{err: err}
+	}
+
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return result{err: fmt.Errorf("read %s: %w", entry.Path, err)}
@@ -398,6 +520,16 @@ func (r *run) recordedRepo(name, owner string) bool {
 	entry, ok := r.state.Get(name)
 
 	return ok && entry.Repo != nil && entry.Repo.Owner == owner && entry.Repo.Name == name
+}
+
+func (r *run) recordedCommit(name, owner string) string {
+	if !r.recordedRepo(name, owner) {
+		return ""
+	}
+
+	entry, _ := r.state.Get(name)
+
+	return entry.Repo.Commit
 }
 
 func (r *run) saveGist(name, id, hash string) error {
@@ -515,10 +647,107 @@ func gistURL(id string) string {
 func failureMessage(name string, err error) string {
 	var notFound *gist.NotFoundError
 	if errors.As(err, &notFound) {
-		return fmt.Sprintf("failed: %v; remove %q from %s", notFound, name, stateFile)
+		return fmt.Sprintf("%v; remove %q from %s", notFound, name, stateFile)
 	}
 
-	return "failed: " + err.Error()
+	return shortReason(err)
+}
+
+// NOTE: Keep one output shape so Gist and repository failures remain easy to scan.
+func (r *run) fail(name, kind, reason string, err error) {
+	fmt.Fprintf(r.out, "✖ %-*s  %s  failed: %s\n", r.width, name, kind, reason)
+
+	var blocked *blockedError
+	if errors.As(err, &blocked) {
+		for _, line := range blocked.lines {
+			fmt.Fprintf(r.out, "    %s\n", line)
+		}
+	}
+
+	r.failures = append(r.failures, fmt.Errorf("%s: %w", name, err))
+	r.counts.failed++
+}
+
+// NOTE: Carry detail lines separately so blocked-entry diagnostics never expose content.
+type blockedError struct {
+	reason string
+	lines  []string
+}
+
+func (e *blockedError) Error() string {
+	return e.reason
+}
+
+func (r *run) guardSuspicious(name string, files []string) error {
+	matches := scan.Suspicious(files)
+	if len(matches) == 0 {
+		return nil
+	}
+	if !r.opts.AllowSuspicious {
+		return &blockedError{reason: "suspicious files selected", lines: matches}
+	}
+
+	for _, file := range matches {
+		fmt.Fprintf(r.out, "⚠ %s: allowed suspicious file %s\n", name, file)
+	}
+
+	return nil
+}
+
+func (r *run) scanFile(name, path string) error {
+	if !r.scanning {
+		return nil
+	}
+
+	findings, err := r.opts.Scan.File(r.ctx, path, name)
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", name, err)
+	}
+
+	return blockFindings(findings)
+}
+
+func (r *run) scanFiles(name, rel string, files []string) error {
+	if !r.scanning {
+		return nil
+	}
+
+	source := filepath.Join(r.opts.Root, filepath.FromSlash(rel))
+	findings, err := r.opts.Scan.Files(r.ctx, source, files)
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", name, err)
+	}
+
+	return blockFindings(findings)
+}
+
+func (r *run) scanHistory(name, rel string) error {
+	if !r.scanning {
+		return nil
+	}
+
+	findings, err := r.opts.Scan.History(r.ctx, r.opts.Root, rel)
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", name, err)
+	}
+
+	return blockFindings(findings)
+}
+
+func blockFindings(findings []scan.Finding) error {
+	if len(findings) == 0 {
+		return nil
+	}
+
+	lines := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		lines = append(lines, finding.String())
+	}
+
+	return &blockedError{
+		reason: fmt.Sprintf("secret scan found %d %s", len(findings), plural(len(findings), "issue")),
+		lines:  lines,
+	}
 }
 
 func formatDelta(res repo.Result) string {
@@ -538,6 +767,18 @@ func formatDelta(res repo.Result) string {
 
 func noDelta(res repo.Result) bool {
 	return res.Added == 0 && res.Changed == 0 && res.Removed == 0
+}
+
+func shortCommit(commit string) string {
+	if len(commit) > 7 {
+		return commit[:7]
+	}
+
+	return commit
+}
+
+func repoURL(owner, name string) string {
+	return "https://github.com/" + owner + "/" + name
 }
 
 func shortReason(err error) string {

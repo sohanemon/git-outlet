@@ -1,0 +1,31 @@
+[tools]
+go = "latest"
+
+[env]
+BIN = "git-outlet"
+
+[tasks.build]
+description = "Build the binary into bin/"
+sources = ["go.mod", "go.sum", "cmd/**/*.go", "**/*.go"]
+outputs = ["bin/{{env.BIN}}"]
+run = 'go build -trimpath -ldflags="-s -w" -o bin/$BIN ./cmd/$BIN'
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = "rm -rf bin"
+
+[tasks.install]
+description = "Install the binary via go install"
+run = 'go install -trimpath -ldflags="-s -w" ./cmd/$BIN'
+
+[tasks.test]
+description = "Run all tests"
+run = "go test ./..."
+
+[tasks.uninstall]
+description = "Remove the installed binary"
+run = '''
+gobin="$(go env GOBIN)"
+[ -n "$gobin" ] || gobin="$(go env GOPATH)/bin"
+rm -f "$gobin/$BIN"
+'''

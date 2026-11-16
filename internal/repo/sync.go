@@ -30,6 +30,12 @@ type Result struct {
 	Added   int
 	Changed int
 	Removed int
+	Files   []FileChange
+}
+
+type FileChange struct {
+	Status string
+	Path   string
 }
 
 // NOTE: Sync replaces the public repository content with the selection, then commits and pushes.
@@ -79,6 +85,7 @@ func (c *Client) Sync(ctx context.Context, opts SyncOptions) (Result, error) {
 		Added:   prepared.added,
 		Changed: prepared.changed,
 		Removed: prepared.removed,
+		Files:   prepared.files,
 	}, nil
 }
 
@@ -96,6 +103,7 @@ func (c *Client) Preview(ctx context.Context, opts SyncOptions) (Result, error) 
 		Added:   prepared.added,
 		Changed: prepared.changed,
 		Removed: prepared.removed,
+		Files:   prepared.files,
 	}, nil
 }
 
@@ -106,6 +114,7 @@ type prepared struct {
 	added     int
 	changed   int
 	removed   int
+	files     []FileChange
 	noChanges bool
 }
 
@@ -162,6 +171,7 @@ func (c *Client) prepare(ctx context.Context, opts SyncOptions) (prepared, error
 			return prepared{}, fmt.Errorf("read staged changes: %w", err)
 		}
 		p.added, p.changed, p.removed = nameStatus(diff)
+		p.files = nameStatusFiles(diff)
 		keep = true
 		return p, nil
 	}
@@ -334,6 +344,29 @@ func nameStatus(diff string) (added, changed, removed int) {
 	}
 
 	return added, changed, removed
+}
+
+func nameStatusFiles(diff string) []FileChange {
+	changes := make([]FileChange, 0)
+	for _, line := range strings.Split(strings.TrimSpace(diff), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 || fields[0] == "" {
+			continue
+		}
+		status := "~"
+		switch fields[0][0] {
+		case 'A':
+			status = "+"
+		case 'D':
+			status = "-"
+		}
+		changes = append(changes, FileChange{Status: status, Path: fields[len(fields)-1]})
+	}
+
+	return changes
 }
 
 func within(root, target string) bool {

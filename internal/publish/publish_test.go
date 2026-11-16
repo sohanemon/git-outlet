@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -258,7 +259,7 @@ func runPublish(t *testing.T, root string, cfg *config.Config, g *fakeGister, ch
 		change(&opts)
 	}
 
-	err := Run(context.Background(), opts)
+	err := runLegacy(context.Background(), opts)
 
 	return out.String(), err
 }
@@ -615,6 +616,18 @@ func saveRepoState(t *testing.T, root, name string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func stateEntry(t *testing.T, root, name string) (state.Entry, bool) {
+	t.Helper()
+
+	st, err := state.Load(statePath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := st.Get(name)
+
+	return entry, ok
 }
 
 func TestPublishRepoCreated(t *testing.T) {
@@ -1048,6 +1061,186 @@ func TestPublishDryRunCopyMessages(t *testing.T) {
 				t.Errorf("dry run writes: syncs=%d pushes=%d creates=%d", repos.syncs, repos.pushes, repos.creates)
 			}
 		})
+	}
+}
+
+func TestPlanIsReadOnly(t *testing.T) {
+	root := newRepo(t)
+	cfg := repoConfig(
+		config.Entry{Name: "helpers.js", Path: "src/helpers.js"},
+		config.Entry{Name: "new-app", Path: "projects/my-cool-app"},
+	)
+	repos := newFakeRepositor()
+	gister := &fakeGister{}
+	var out bytes.Buffer
+	plan, err := Plan(context.Background(), Options{
+		Config: cfg, Root: root, Repos: repos, Gist: gister, Out: &out,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error: %v", err)
+	}
+	if len(plan.Entries) != 2 || plan.Entries[0].Action != ActionCreate || plan.Entries[1].Action != ActionCreate {
+		t.Fatalf("plan entries = %+v", plan.Entries)
+	}
+	if !plan.Entries[0].CreatesPublic || !plan.Entries[1].CreatesPublic {
+		t.Errorf("create flags = %v/%v, want true", plan.Entries[0].CreatesPublic, plan.Entries[1].CreatesPublic)
+	}
+	if plan.Entries[0].Fingerprint == "" || plan.Entries[1].Fingerprint == "" {
+		t.Errorf("fingerprints are empty: %+v", plan.Entries)
+	}
+	if repos.creates != 0 || repos.syncs != 0 || repos.pushes != 0 || gister.calls != 0 {
+		t.Errorf("Plan() wrote: repo creates=%d syncs=%d pushes=%d, gist calls=%d", repos.creates, repos.syncs, repos.pushes, gister.calls)
+	}
+	if _, err := os.Stat(statePath(root)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Plan() wrote state: %v", err)
+	}
+}
+
+func TestApplyPublishesApprovedPlan(t *testing.T) {
+	root := newRepo(t)
+	cfg := repoConfig(config.Entry{Name: "new-app", Path: "projects/my-cool-app"})
+	repos := newFakeRepositor()
+	var out bytes.Buffer
+	plan, err := Plan(context.Background(), Options{Config: cfg, Root: root, Repos: repos, Out: &out})
+	if err != nil {
+		t.Fatalf("Plan() error: %v", err)
+	}
+	result, err := Apply(context.Background(), plan, plan.ChangedIndexes())
+	if err != nil {
+		t.Fatalf("Apply() error: %v", err)
+	}
+	if result.Published != 1 || repos.creates != 1 || repos.syncs != 1 {
+		t.Errorf("result=%+v creates=%d syncs=%d", result, repos.creates, repos.syncs)
+	}
+	entry, ok := stateEntry(t, root, "new-app")
+	if !ok || entry.Repo == nil || entry.Repo.Commit != repos.syncResult.Commit {
+		t.Errorf("saved state = %+v, found = %v", entry, ok)
+	}
+}
+
+func TestApplyPublishesToLocalBareRemote(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake gh shell command is not executable on Windows")
+	}
+	root := newRepo(t)
+	remoteDir := t.TempDir()
+	binDir := t.TempDir()
+	gh := `#!/bin/sh
+set -eu
+case "$1:$2" in
+  api:repos/octocat/new-app)
+    if [ -d "$REMOTE_DIR/new-app.git" ]; then
+      printf '{"private":false,"default_branch":"main","clone_url":"file://%s/new-app.git"}\n' "$REMOTE_DIR"
+    else
+      echo 'HTTP 404 Not Found' >&2
+      exit 1
+    fi
+    ;;
+  repo:create)
+    git init --bare -q --initial-branch=main "$REMOTE_DIR/new-app.git"
+    ;;
+  repo:clone)
+    git clone -q "$REMOTE_DIR/new-app.git" "$4"
+    ;;
+  *)
+    echo "unexpected gh call: $*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte(gh), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REMOTE_DIR", remoteDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := repoConfig(config.Entry{Name: "new-app", Path: "projects/my-cool-app"})
+	cfg.Settings.Owner = "octocat"
+	var out bytes.Buffer
+	plan, err := Plan(context.Background(), Options{
+		Config: cfg, Root: root, Repos: repo.New(repo.ExecRunner{}), Out: &out,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error: %v", err)
+	}
+	result, err := Apply(context.Background(), plan, plan.ChangedIndexes())
+	if err != nil {
+		t.Fatalf("Apply() error: %v (output %q)", err, out.String())
+	}
+	if result.Published != 1 {
+		t.Errorf("Published = %d, want 1", result.Published)
+	}
+	remote := filepath.Join(remoteDir, "new-app.git")
+	got := outputGit(t, remote, "--git-dir", remote, "show", "main:a.js")
+	if strings.TrimSpace(got) != "a" {
+		t.Errorf("remote a.js = %q, want a", got)
+	}
+	commit := outputGit(t, root, "--git-dir", remote, "rev-parse", "refs/heads/main")
+	entry, ok := stateEntry(t, root, "new-app")
+	if !ok || entry.Repo == nil || entry.Repo.Commit != strings.TrimSpace(commit) {
+		t.Errorf("state entry = %+v, found=%v; remote commit=%q", entry, ok, strings.TrimSpace(commit))
+	}
+}
+
+func outputGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+func TestApplyRejectsChangedEntryAndContinues(t *testing.T) {
+	root := newRepo(t)
+	writeFile(t, root, "projects/second/second.txt", "second")
+	runGit(t, root, "add", "-A")
+	runGit(t, root, "commit", "-q", "-m", "second")
+	cfg := repoConfig(
+		config.Entry{Name: "first", Path: "projects/my-cool-app"},
+		config.Entry{Name: "second", Path: "projects/second"},
+	)
+	repos := newFakeRepositor()
+	var out bytes.Buffer
+	plan, err := Plan(context.Background(), Options{Config: cfg, Root: root, Repos: repos, Out: &out})
+	if err != nil {
+		t.Fatalf("Plan() error: %v", err)
+	}
+	writeFile(t, root, "projects/my-cool-app/a.js", "changed after approval")
+	result, err := Apply(context.Background(), plan, plan.ChangedIndexes())
+	if err == nil || !strings.Contains(err.Error(), "changed since you approved it; run again") {
+		t.Fatalf("Apply() error = %v, want changed-entry error", err)
+	}
+	if result.Failed != 1 || result.Published != 1 || repos.syncs != 1 {
+		t.Errorf("result=%+v syncs=%d", result, repos.syncs)
+	}
+	if _, ok := stateEntry(t, root, "first"); ok {
+		t.Error("state was written for changed entry")
+	}
+	if _, ok := stateEntry(t, root, "second"); !ok {
+		t.Error("unchanged approved entry was not applied")
+	}
+}
+
+func TestAllBlockedPlanFails(t *testing.T) {
+	root := newRepo(t)
+	writeFile(t, root, ".env", "secret-like path")
+	runGit(t, root, "add", ".env")
+	runGit(t, root, "commit", "-q", "-m", "add env")
+	cfg := repoConfig(config.Entry{Name: "env", Path: ".env"})
+	repos := newFakeRepositor()
+	var out bytes.Buffer
+	plan, err := Plan(context.Background(), Options{Config: cfg, Root: root, Repos: repos, Out: &out})
+	if err != nil {
+		t.Fatalf("Plan() error: %v", err)
+	}
+	if plan.Entries[0].Action != ActionBlocked {
+		t.Fatalf("action = %q, want blocked", plan.Entries[0].Action)
+	}
+	result, err := Apply(context.Background(), plan, nil)
+	if err == nil || result.Failed != 1 || repos.syncs != 0 {
+		t.Errorf("Apply() result=%+v err=%v syncs=%d", result, err, repos.syncs)
 	}
 }
 

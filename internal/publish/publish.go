@@ -57,7 +57,7 @@ type Options struct {
 }
 
 // NOTE: Continue after per-entry failures so independent entries still publish.
-func Run(ctx context.Context, opts Options) error {
+func runLegacy(ctx context.Context, opts Options) error {
 	if err := validateOnly(opts.Config, opts.Only); err != nil {
 		return err
 	}

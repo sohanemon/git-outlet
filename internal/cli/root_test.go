@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,10 +15,17 @@ import (
 func runRoot(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 
-	cmd := newRootCmd()
+	return runRootInteractive(t, true, "y\n", args...)
+}
+
+func runRootInteractive(t *testing.T, terminal bool, input string, args ...string) (string, error) {
+	t.Helper()
+
+	cmd := newRootCmdWithTerminal(func() bool { return terminal })
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(input))
 	cmd.SetArgs(args)
 	cmd.SetContext(context.Background())
 
@@ -160,6 +168,120 @@ func TestPublishRejectsEmptyMessageBeforeWork(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPublishRequiresTerminalOrYes(t *testing.T) {
+	chdir(t, t.TempDir())
+
+	out, err := runRootInteractive(t, false, "", "--message", "ok")
+	if err == nil || err.Error() != "confirmation needed: run in a terminal or pass --yes" {
+		t.Fatalf("error = %v, output %q; want confirmation-needed error", err, out)
+	}
+	if out != "" {
+		t.Errorf("output = %q, want empty", out)
+	}
+}
+
+func TestDryRunYesDoesNotPromptOrPublish(t *testing.T) {
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", "publish:\n  helpers.js: src/helpers.js\n")
+	chdir(t, root)
+
+	out, err := runRootInteractive(t, false, "", "--dry-run", "--yes")
+	if err != nil {
+		t.Fatalf("command error: %v (output %q)", err, out)
+	}
+	if strings.Contains(out, "Publish ") || strings.Contains(out, "Aborted") {
+		t.Errorf("dry-run prompted for confirmation: %q", out)
+	}
+	if strings.Contains(out, "published,") {
+		t.Errorf("dry-run applied a publish: %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git-outlet-state.json")); !os.IsNotExist(err) {
+		t.Errorf("state file exists after dry-run: %v", err)
+	}
+}
+
+func TestYesPublishesWithoutReadingInput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake gh shell command is not executable on Windows")
+	}
+	root := newCheckRepo(t)
+	writeRepoFile(t, root, "outlet.yml", "settings:\n  secret_scan: false\npublish:\n  helpers.js: src/helpers.js\n")
+	setFakeGistGH(t)
+	chdir(t, root)
+
+	out, err := runRootInteractive(t, false, "", "--yes")
+	if err != nil {
+		t.Fatalf("command error: %v (output %q)", err, out)
+	}
+	if strings.Contains(out, "Publish ") || strings.Contains(out, "Aborted") {
+		t.Errorf("--yes prompted for confirmation: %q", out)
+	}
+	if !strings.Contains(out, "helpers.js   gist  created") {
+		t.Errorf("output %q does not show the Gist publish", out)
+	}
+}
+
+func TestDeclinedConfirmationDoesNotCallGitHubOrWriteState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake gh shell command is not executable on Windows")
+	}
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "no", input: "N\n"},
+		{name: "empty", input: "\n"},
+		{name: "eof", input: ""},
+		{name: "three invalid answers", input: "x\nx\nx\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newCheckRepo(t)
+			writeRepoFile(t, root, "outlet.yml", "settings:\n  secret_scan: false\npublish:\n  helpers.js: src/helpers.js\n")
+			logPath := filepath.Join(t.TempDir(), "gh.log")
+			setLoggedGistGH(t, logPath)
+			chdir(t, root)
+
+			out, err := runRootInteractive(t, true, tt.input)
+			if !errors.Is(err, ErrAborted) {
+				t.Fatalf("error = %v, output %q; want ErrAborted", err, out)
+			}
+			if !strings.Contains(out, "Aborted. Nothing was published.") {
+				t.Errorf("output %q does not report abort", out)
+			}
+			if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+				t.Errorf("gh was called after decline: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(root, ".git-outlet-state.json")); !os.IsNotExist(err) {
+				t.Errorf("state was written after decline: %v", err)
+			}
+		})
+	}
+}
+
+func setFakeGistGH(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gh")
+	script := "#!/bin/sh\ncat >/dev/null\nprintf '{\\\"id\\\":\\\"local-gist\\\",\\\"html_url\\\":\\\"https://gist.github.com/local-gist\\\"}\\n'\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func setLoggedGistGH(t *testing.T, logPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gh")
+	script := "#!/bin/sh\nprintf called >> \"$GH_LOG\"\nprintf '{\\\"id\\\":\\\"local-gist\\\",\\\"html_url\\\":\\\"https://gist.github.com/local-gist\\\"}\\n'\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GH_LOG", logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func TestVersionDefaults(t *testing.T) {
@@ -316,9 +438,11 @@ publish:
 	}
 
 	for _, want := range []string{
-		"✔ helpers.js    gist  would create",
-		"✔ my-cool-app   repo  would create",
-		"2 would publish, 0 unchanged, 0 skipped, 0 failed",
+		"1  helpers.js  gist create",
+		"2  my-cool-app repo create",
+		"NEW PUBLIC GIST",
+		"NEW PUBLIC REPO github.com/octocat/my-cool-app",
+		"Creating public repositories and gists cannot be undone by this tool.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q does not contain %q", out, want)
@@ -357,7 +481,7 @@ func TestPublishDryRunFlagsAndOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v (output %q)", err, out)
 	}
-	if !strings.Contains(out, "✔ helpers.js   gist  would create") {
+	if !strings.Contains(out, "helpers.js gist create") {
 		t.Errorf("output %q does not contain the selected entry", out)
 	}
 	if strings.Contains(out, "my-cool-app") {
@@ -397,10 +521,10 @@ func TestPublishExplicitConfigRelativeToCwd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v (output %q)", err, out)
 	}
-	if !strings.Contains(out, "✔ chosen") {
+	if !strings.Contains(out, "chosen gist create") {
 		t.Errorf("output %q does not list the explicit config entry", out)
 	}
-	if strings.Contains(out, "✔ default") {
+	if strings.Contains(out, "default gist") {
 		t.Errorf("output %q used the default config", out)
 	}
 }

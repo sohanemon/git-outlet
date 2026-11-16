@@ -188,6 +188,7 @@ func TestSyncAddsAndPreservesExecutableBit(t *testing.T) {
 	source := newSourceRepo(t, map[string]string{"a.js": "a", "sub/b.sh": "b"})
 	writeFileMode(t, source, "run.sh", "#!/bin/sh\n", 0o755)
 	runGit(t, source, "add", "-A")
+	runGit(t, source, "update-index", "--chmod=+x", "run.sh")
 	runGit(t, source, "commit", "-q", "-m", "exec")
 
 	bare := newBareRepo(t)
@@ -407,7 +408,7 @@ func TestCopyFilesRejectsEscape(t *testing.T) {
 	dest := t.TempDir()
 	writeFile(t, source, "ok.txt", "ok")
 
-	err := copyFiles(source, dest, []string{"../evil.txt"})
+	err := copyFiles(source, dest, []string{"../evil.txt"}, nil)
 	if err == nil {
 		t.Fatal("copyFiles() error = nil, want an escape error")
 	}

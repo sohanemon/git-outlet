@@ -126,11 +126,24 @@ func (c *Client) prepare(ctx context.Context, opts SyncOptions) (prepared, error
 	if err := clearWorktree(p.dir); err != nil {
 		return prepared{}, err
 	}
-	if err := copyFiles(opts.Source, p.dir, opts.Files); err != nil {
+	modes, err := c.fileModes(ctx, opts.Source, opts.Files)
+	if err != nil {
+		return prepared{}, err
+	}
+	if err := copyFiles(opts.Source, p.dir, opts.Files, modes); err != nil {
 		return prepared{}, err
 	}
 	if _, err := c.runner.Run(ctx, p.dir, "git", "add", "-A"); err != nil {
 		return prepared{}, fmt.Errorf("stage files: %w", err)
+	}
+	for _, file := range opts.Files {
+		change := "-x"
+		if modes[filepath.ToSlash(file)]&0o111 != 0 {
+			change = "+x"
+		}
+		if _, err := c.runner.Run(ctx, p.dir, "git", "update-index", "--chmod="+change, "--", file); err != nil {
+			return prepared{}, fmt.Errorf("set tracked mode for %s: %w", file, err)
+		}
 	}
 
 	status, err := c.runner.Run(ctx, p.dir, "git", "status", "--porcelain")
@@ -222,7 +235,40 @@ func clearWorktree(dir string) error {
 	return nil
 }
 
-func copyFiles(source, dest string, files []string) error {
+func (c *Client) fileModes(ctx context.Context, source string, files []string) (map[string]fs.FileMode, error) {
+	out, err := c.runner.Run(ctx, source, "git", "ls-files", "--stage", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("read tracked file modes: %w", err)
+	}
+
+	wanted := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		wanted[filepath.ToSlash(file)] = struct{}{}
+	}
+	modes := make(map[string]fs.FileMode, len(files))
+	for _, record := range strings.Split(out, "\x00") {
+		metadata, path, ok := strings.Cut(record, "\t")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(metadata)
+		if len(fields) != 3 || fields[2] != "0" {
+			continue
+		}
+		path = filepath.ToSlash(path)
+		if _, ok := wanted[path]; !ok {
+			continue
+		}
+		mode := fs.FileMode(0o644)
+		if fields[0] == "100755" {
+			mode = 0o755
+		}
+		modes[path] = mode
+	}
+	return modes, nil
+}
+
+func copyFiles(source, dest string, files []string, modes map[string]fs.FileMode) error {
 	for _, file := range files {
 		rel := filepath.FromSlash(file)
 		target := filepath.Join(dest, rel)
@@ -244,9 +290,9 @@ func copyFiles(source, dest string, files []string) error {
 			return fmt.Errorf("read %s: %w", file, err)
 		}
 
-		mode := fs.FileMode(0o644)
-		if info.Mode()&0o111 != 0 {
-			mode = 0o755
+		mode, ok := modes[filepath.ToSlash(file)]
+		if !ok {
+			mode = 0o644
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return fmt.Errorf("create directory for %s: %w", file, err)

@@ -1,129 +1,157 @@
 # git-outlet
 
-Publish selected files and folders from a private Git repository to public Gists and repositories. This lets you share parts of a project without making the source repository public.
+Publish selected files and folders from any local Git repository as public Gists or repositories. Use it to share part of a private project without publishing the whole source.
 
 ## Install
 
-On macOS, install the Homebrew Cask:
+With Homebrew on macOS:
 
 ```sh
-brew tap sohanemon/tap
-brew install --cask git-outlet
+brew install --cask sohanemon/tap/git-outlet
 ```
 
-The cask installs prebuilt macOS binaries. For Linux, Windows, or manual macOS installation, download the archive for your operating system and architecture from [GitHub Releases](https://github.com/sohanemon/git-outlet/releases), extract it, and put the executable (`git-outlet` or `git-outlet.exe` on Windows) on your `PATH`.
+With [mise](https://mise.jdx.dev/):
 
-The release binaries are not code-signed or notarized. macOS Gatekeeper may block an unsigned binary from opening.
+```sh
+mise use -g github:sohanemon/git-outlet
+```
 
-## Requirements
-
-- `git` to read the private repository.
-- GitHub CLI (`gh`) to publish. Sign in with `gh auth login` and configure Git authentication with `gh auth setup-git`.
-- `gitleaks` is optional. It scans selected files and subtree history when installed. Without it, git-outlet warns and continues.
-- `git subtree` is required for entries using subtree mode.
+Or download an archive for Linux, Windows, or macOS from [GitHub Releases](https://github.com/sohanemon/git-outlet/releases) and put `git-outlet` (or `git-outlet.exe`) on your `PATH`.
 
 ## Quick start
 
-1. Create `outlet.yml` by copying `outlet.example.yml`. Set your GitHub owner and edit paths and names to match tracked files in your repository.
-2. Check the configuration:
+1. Copy [outlet.example.yml](outlet.example.yml) to `outlet.yml` and edit the paths and names.
+2. Check and preview:
 
    ```sh
    git outlet check
-   ```
-
-3. Preview the publish:
-
-   ```sh
    git outlet --dry-run
    ```
 
-4. Publish:
+3. Publish:
 
    ```sh
    git outlet
    ```
 
-## Config reference
+## Example
 
-The top-level `settings` block is optional. `publish` maps each public entry name to a path or entry mapping. A string value is shorthand for `path`.
+```yaml
+settings:
+  owner: your-github-name
+
+publish:
+  parser-lib: packages/parser
+  readme:
+    path: docs/README.md
+    description: Parser library guide
+```
+
+File entries publish as Gists. Folder entries publish as public repositories in `copy` mode by default.
+
+<details>
+<summary>Configuration</summary>
+
+`publish` maps public names to tracked files or folders. A string is shorthand for an entry's `path`.
 
 ### Settings
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `owner` | string | empty | GitHub owner; an empty value uses the authenticated `gh` account. |
+| `owner` | string | empty | GitHub owner; empty uses the authenticated `gh` account. |
 | `mode` | string | `copy` | Default folder mode: `copy` or `subtree`. |
-| `branch` | string | `main` | Destination branch for public repositories. |
-| `message` | string | empty | Default copy-mode commit message; when empty, git-outlet uses `Update from private repo (<short HEAD>)`. |
+| `branch` | string | `main` | Branch for public repositories. |
+| `message` | string | empty | Default commit message for copy-mode folders. |
 | `secret_scan` | boolean | `true` | Run gitleaks before publishing and when `check --scan` is used. |
 
 ### Entry fields
 
-The mapping key is the entry name. Use a file path for a Gist entry and a folder path for a repository entry.
-
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `path` | string | required | Tracked file or folder inside the private repository. |
-| `description` | string | empty | Gist description or new public repository description. |
-| `include` | list of strings | empty | Select matching tracked files in copy mode. |
-| `exclude` | list of strings | empty | Remove matching tracked files after include selection; exclude wins. |
-| `message` | string | empty | Copy-mode commit message; otherwise inherits `settings.message` and then the generated default. |
+| `path` | string | required | Tracked file for a Gist or folder for a repository. |
+| `description` | string | empty | Gist or newly created repository description. |
+| `include` | list of strings | empty | Include matching files in copy mode. |
+| `exclude` | list of strings | empty | Exclude matching files after inclusion; exclude wins. |
+| `message` | string | empty | Copy-mode commit message; overrides the settings message. |
 | `mode` | string | inherited from settings (`copy`) | Folder publishing mode. File entries always publish as Gists. |
 
-Include and exclude patterns are relative to `path`. A pattern without `/` matches a base name at any depth. A pattern containing `/` matches the full path relative to `path`. `**` can match across directories. Only tracked files are considered. Subtree entries publish the whole folder and cannot use include or exclude patterns.
+Patterns are relative to `path`. A pattern without `/` matches a base name at any depth; a pattern with `/` matches the full relative path. `**` matches across directories. Only tracked files are selected. `subtree` publishes the whole folder and does not support include or exclude patterns.
+</details>
 
-## Modes
+<details>
+<summary>Modes and safety</summary>
 
-| Mode | History | Commit message | Include/exclude | What becomes public |
-| --- | --- | --- | --- | --- |
-| `copy` | Only the current selected files are copied; private history is not copied. | `-m`, entry message, settings message, then a generated message. | Supported for folders. | Selected current files in a public repository; file entries are public Gists. |
-| `subtree` | Publishes the full history of the folder, including deleted files and older versions. | Uses messages from private history; configured messages do not apply. | Not supported. | The folder and all of its history in a public repository. |
+| Mode | History published | Message | Selection |
+| --- | --- | --- | --- |
+| `copy` | Current selected files only | `-m`, entry message, settings message, then a generated message | Include/exclude supported |
+| `subtree` | Full folder history, including deleted files and old versions | Source commit messages | Whole folder |
 
-## Commands and flags
+Folder repositories must be public. An existing non-empty repository that git-outlet does not record requires `--adopt`.
 
-`git outlet check` validates the configuration and tracked paths. Add `--scan` to run gitleaks and report findings as errors. `settings.secret_scan: false` disables that scan; suspicious filename warnings remain enabled.
+Before publishing, git-outlet blocks suspicious filenames such as `.env`, private keys, and credential files. If gitleaks is installed and `secret_scan` is enabled, it also scans the selected copy files or the history that subtree mode would publish. Findings block that entry. Gitleaks may not find every secret. `--allow-suspicious` bypasses only the filename rule.
 
-The root command publishes entries. Its flags are:
+`.git-outlet-state.json` stores Gist IDs and content hashes, plus repository commits. Keep it with the source repository; losing Gist IDs can cause duplicate Gists. Subtree mode exposes the folder's complete history.
+</details>
 
-| Flag | Meaning |
+<details>
+<summary>Commands</summary>
+
+| Command or flag | Purpose |
 | --- | --- |
-| `--dry-run` | Scan and preview without creating repositories, pushing, publishing Gists, or writing state. |
-| `-m`, `--message` | Override the copy-mode commit message. Subtree mode uses private history messages. |
-| `--only NAME` | Publish only the named entry. |
-| `--adopt` | Allow taking over an existing non-empty public repository that git-outlet does not have in its state file. |
-| `--allow-suspicious` | Allow filenames that match the suspicious-file rules. Gitleaks findings still block publishing. |
-| `--config PATH` | Read configuration from `PATH` instead of `outlet.yml`. |
-| `--version` | Print the version, commit, and build date. |
+| `git outlet check` | Validate configuration and selected tracked paths. |
+| `git outlet check --scan` | Also scan with gitleaks and report findings as errors. |
+| `git outlet --dry-run` | Scan and preview without publishing or writing state. |
+| `-m, --message TEXT` | Override the copy-mode message; ignored by subtree mode. |
+| `--only NAME` | Publish only one entry. |
+| `--adopt` | Allow using an existing public repository not recorded in state. |
+| `--allow-suspicious` | Publish suspiciously named files, while still blocking gitleaks findings. |
+| `--config PATH` | Read a different config file. |
+| `--version` | Print version, commit, and build date. |
 
-Cobra provides shell completion:
+Run the command for your shell. Add it to your shell's startup file to enable completion in future sessions.
+
+### Bash
 
 ```sh
 source <(git-outlet completion bash)
-git-outlet completion zsh
-git-outlet completion fish
-git-outlet completion powershell
 ```
 
-## Safety
+### Zsh
 
-- git-outlet publishes tracked files only. Symlinks and missing tracked files are skipped.
-- Folder destinations must be public repositories. Existing non-empty repositories not recorded in `.git-outlet-state.json` require `--adopt`.
-- When enabled, gitleaks scans the exact files selected for copy mode and the history that subtree mode would publish. A finding blocks that entry, including during a dry run. Gitleaks is a detector, not a guarantee that every secret will be found.
-- Suspicious filenames such as `.env`, private keys, and credential files are blocked independently of gitleaks. `--allow-suspicious` overrides only this filename rule.
-- `.git-outlet-state.json` records Gist IDs, content hashes, and repository commits. Keep it with the private repository. If you lose the Gist IDs, git-outlet can create duplicate Gists.
-- Subtree mode makes the folder's complete history public, including deleted files and older versions.
+```sh
+source <(git-outlet completion zsh)
+```
 
-## Troubleshooting
+### Fish
 
-- **GitHub push authentication fails:** run `gh auth login`, then `gh auth setup-git` so Git can use the GitHub CLI credentials.
-- **`git subtree` is unavailable:** install the `git-subtree` package or enable the subtree command provided by your Git distribution.
-- **A subtree push is rejected:** the public repository may have changed outside git-outlet. Review both histories and reconcile them before retrying; git-outlet does not force-push.
-- **A Gist was deleted on GitHub:** remove that entry from `.git-outlet-state.json` and publish again to create a new Gist.
-- **Copy-mode commit fails with a missing identity:** configure `git config user.name` and `git config user.email` in the private repository.
+```fish
+git-outlet completion fish | source
+```
+</details>
 
-## Development
+<details>
+<summary>Requirements and troubleshooting</summary>
 
-Run the checks and build locally:
+- `git` and `gh`.
+- Publishing requires a logged-in GitHub CLI account. Run `gh auth login`; run `gh auth setup-git` if Git push authentication is not configured.
+- `gitleaks` is optional. If missing, git-outlet warns and continues.
+- `git subtree` is required for subtree mode.
+
+**Push authentication fails:** run `gh auth setup-git`.
+
+**`git subtree` is missing:** install the `git-subtree` package or enable the command provided by your Git distribution.
+
+**A subtree push is rejected:** the public repository may have changed outside git-outlet. Reconcile the histories before retrying; pushes are never forced.
+
+**A Gist was deleted:** remove its entry from `.git-outlet-state.json` and publish again.
+
+**A copy-mode commit has no identity:** configure `git config user.name` and `git config user.email` in the source repository.
+</details>
+
+<details>
+<summary>Development and releases</summary>
+
+Requires Go 1.22 or newer.
 
 ```sh
 go test ./...
@@ -131,12 +159,13 @@ go vet ./...
 go build -o git-outlet ./cmd/git-outlet
 ```
 
-To cut a release, create and push a version tag. GitHub Actions builds and publishes the release:
+Create and push a version tag to publish a release:
 
 ```sh
 git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
+</details>
 
 ## License
 

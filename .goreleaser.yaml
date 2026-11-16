@@ -1,0 +1,51 @@
+version: 2
+project_name: git-outlet
+
+builds:
+  - id: git-outlet
+    main: ./cmd/git-outlet
+    binary: git-outlet
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/sohanemon/git-outlet/internal/cli.version={{ .Version }} -X github.com/sohanemon/git-outlet/internal/cli.commit={{ .Commit }} -X github.com/sohanemon/git-outlet/internal/cli.date={{ .Date }}
+
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  filters:
+    exclude:
+      - ^docs:
+      - ^test:
+
+homebrew_casks:
+  - name: git-outlet
+    binaries:
+      - git-outlet
+    homepage: https://github.com/sohanemon/git-outlet
+    description: Publish selected files and folders from a private Git repository
+    repository:
+      owner: sohanemon
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"

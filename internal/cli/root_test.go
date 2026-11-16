@@ -265,7 +265,7 @@ func setFakeGistGH(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "gh")
-	script := "#!/bin/sh\ncat >/dev/null\nprintf '{\\\"id\\\":\\\"local-gist\\\",\\\"html_url\\\":\\\"https://gist.github.com/local-gist\\\"}\\n'\n"
+	script := "#!/bin/sh\ncat >/dev/null\nprintf '{\"id\":\"local-gist\",\"html_url\":\"https://gist.github.com/local-gist\"}\\n'\n"
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func setLoggedGistGH(t *testing.T, logPath string) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "gh")
-	script := "#!/bin/sh\nprintf called >> \"$GH_LOG\"\nprintf '{\\\"id\\\":\\\"local-gist\\\",\\\"html_url\\\":\\\"https://gist.github.com/local-gist\\\"}\\n'\n"
+	script := "#!/bin/sh\nprintf called >> \"$GH_LOG\"\nprintf '{\"id\":\"local-gist\",\"html_url\":\"https://gist.github.com/local-gist\"}\\n'\n"
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
